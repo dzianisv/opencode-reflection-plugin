@@ -39,7 +39,7 @@ Restart opencode after installation.
 ## Features
 
 - Automatic trigger on session idle
-- Collects context: initial task, AGENTS.md, last 10 tool calls, reasoning, final result
+- Collects context: last user task, AGENTS.md, last 10 tool calls, last assistant response
 - Creates separate judge session for unbiased evaluation
 - Auto-continues agent with feedback if task incomplete
 - Max 3 attempts to prevent infinite loops
