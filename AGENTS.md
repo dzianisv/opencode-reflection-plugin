@@ -3,16 +3,22 @@
 ## Plugin Architecture
 
 ### Message Flow
-The plugin integrates seamlessly with OpenCode's chat UI:
+The plugin integrates seamlessly with OpenCode's UI:
 - **Judge evaluation** happens in a separate session (invisible to user)
-- **Reflection feedback** appears as user messages in the main chat
-- **Console logs** are for debugging only (appear in server logs, not chat)
+- **Reflection feedback** appears as user messages in the main chat via `client.session.prompt()`
+- **Toast notifications** show status updates via `client.tui.publish()` (non-intrusive)
 
-All feedback is delivered via `client.session.prompt()` which:
-- ✅ Appears in the OpenCode chat UI naturally
-- ✅ Is visible in the message history
-- ✅ Triggers the agent to respond
-- ❌ Does NOT disrupt terminal output
+Feedback delivery methods:
+1. **Chat messages** (`client.session.prompt()`):
+   - ✅ Full feedback details with markdown formatting
+   - ✅ Visible in message history
+   - ✅ Triggers the agent to respond
+   
+2. **Toast notifications** (`client.tui.publish()`):
+   - ✅ Brief status updates (e.g., "Task complete ✓")
+   - ✅ Non-intrusive, auto-dismiss
+   - ✅ Color-coded by severity (success/warning/error)
+   - ✅ Does NOT pollute terminal or chat
 
 ### Feedback Design
 The judge ALWAYS provides feedback for both complete and incomplete tasks:

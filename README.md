@@ -39,12 +39,15 @@ Restart opencode after installation.
 
 ## Features
 
-- Automatic trigger on session idle
-- Collects context: last user task, AGENTS.md (1500 chars), last 10 tool calls, last assistant response (2000 chars)
-- Creates separate judge session for unbiased evaluation
-- Auto-continues agent with feedback if task incomplete
-- Max 3 attempts to prevent infinite loops
-- Skips judge sessions automatically to prevent infinite reflection
+- **Automatic trigger** on session idle
+- **Rich context collection**: last user task, AGENTS.md (1500 chars), last 10 tool calls, last assistant response (2000 chars)
+- **Separate judge session** for unbiased evaluation
+- **Chat-integrated feedback**: Reflection messages appear naturally in the OpenCode chat UI
+- **Toast notifications**: Non-intrusive status updates (success/warning/error) in the OpenCode interface
+- **Auto-continuation**: Agent automatically continues with feedback if task incomplete
+- **Max 3 attempts** to prevent infinite loops
+- **Infinite loop prevention**: Automatically skips judge sessions to prevent recursion
+- **Always provides feedback**: Both complete and incomplete tasks receive confirmation/guidance
 
 ## Known Limitations
 

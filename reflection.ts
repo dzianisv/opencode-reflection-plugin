@@ -15,7 +15,25 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
   const attempts = new Map<string, number>()
   const judgeSessionIds = new Set<string>()
 
-  console.log(`[Reflection] Plugin initialized for: ${directory}`)
+  // Helper to show toast notifications in OpenCode UI
+  async function showToast(message: string, variant: "info" | "success" | "warning" | "error" = "info") {
+    try {
+      await client.tui.publish({
+        query: { directory },
+        body: {
+          type: "tui.toast.show",
+          properties: {
+            title: "Reflection",
+            message,
+            variant,
+            duration: 5000
+          }
+        }
+      })
+    } catch (e) {
+      // Silently fail if TUI not available (e.g., in tests)
+    }
+  }
 
   async function getAgentsFile(): Promise<string> {
     for (const name of ["AGENTS.md", ".opencode/AGENTS.md", "agents.md"]) {
@@ -75,7 +93,7 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
     if (judgeSessionIds.has(sessionId)) return
     const attemptCount = attempts.get(sessionId) || 0
     if (attemptCount >= MAX_ATTEMPTS) {
-      console.log(`[Reflection] Max attempts reached for ${sessionId}`)
+      await showToast(`Max reflection attempts (${MAX_ATTEMPTS}) reached`, "warning")
       attempts.delete(sessionId)
       return
     }
@@ -135,7 +153,7 @@ Evaluate if this task is COMPLETE. Reply with JSON only:
       // Parse JSON response
       const jsonMatch = judgeText.match(/\{[\s\S]*\}/)
       if (!jsonMatch) {
-        console.log("[Reflection] No JSON in judge response")
+        await showToast("Failed to parse judge response", "error")
         return
       }
 
@@ -146,6 +164,9 @@ Evaluate if this task is COMPLETE. Reply with JSON only:
 
       if (!verdict.complete) {
         attempts.set(sessionId, attemptCount + 1)
+
+        // Show toast notification
+        await showToast(`Task incomplete (${attemptCount + 1}/${MAX_ATTEMPTS})`, "warning")
 
         // Send actionable feedback to continue the task
         await client.session.prompt({
@@ -162,6 +183,9 @@ Please address the above issues and continue working on the task.`
           }
         })
       } else {
+        // Show success toast
+        await showToast("Task complete ✓", "success")
+
         // Task complete - send summary as confirmation
         await client.session.prompt({
           path: { id: sessionId },
@@ -177,10 +201,8 @@ ${feedback}`
         attempts.delete(sessionId)
       }
     } catch (e) {
-      console.log("[Reflection] Error:", e instanceof Error ? e.message : String(e))
-      if (e instanceof Error && e.stack) {
-        console.log("[Reflection] Stack:", e.stack)
-      }
+      const errorMsg = e instanceof Error ? e.message : String(e)
+      await showToast(`Reflection error: ${errorMsg}`, "error")
     } finally {
       judgeSessionIds.delete(judgeSession.id)
     }
