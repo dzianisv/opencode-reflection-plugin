@@ -32,8 +32,8 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
     const tools: string[] = []
 
     for (const msg of messages) {
-      // Get first user message as task
-      if (!task && msg.info?.role === "user") {
+      // Get LAST user message as task (override each time)
+      if (msg.info?.role === "user") {
         for (const part of msg.parts || []) {
           if (part.type === "text" && part.text) {
             // Skip if this is a judge prompt
@@ -132,7 +132,9 @@ Is this task COMPLETE? Reply with JSON only:
       }
 
       const verdict = JSON.parse(jsonMatch[0])
-      console.log(`[Reflection] Verdict: ${verdict.complete ? "COMPLETE" : "INCOMPLETE"}`)
+      const status = verdict.complete ? "COMPLETE" : "INCOMPLETE"
+      console.log(`[Reflection] Verdict: ${status}`)
+      console.log(`[Reflection] Feedback: ${verdict.feedback || "(none)"}`)
 
       if (!verdict.complete && verdict.feedback) {
         attempts.set(sessionId, attemptCount + 1)

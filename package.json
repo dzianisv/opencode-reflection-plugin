@@ -7,7 +7,8 @@
   "scripts": {
     "test": "node --experimental-strip-types --test test/reflection.test.ts",
     "test:e2e": "node --experimental-strip-types --test test/e2e.test.ts",
-    "typecheck": "npx tsc --noEmit"
+    "typecheck": "npx tsc --noEmit",
+    "install:global": "mkdir -p ~/.config/opencode/plugin && cp reflection.ts ~/.config/opencode/plugin/"
   },
   "keywords": [
     "opencode",
