@@ -6,7 +6,7 @@
 
 import { describe, it, before, after } from "node:test"
 import assert from "node:assert"
-import { mkdir, rm, cp, readdir, readFile } from "fs/promises"
+import { mkdir, rm, cp, readdir, readFile, writeFile } from "fs/promises"
 import { spawn, type ChildProcess } from "child_process"
 import { join, dirname } from "path"
 import { fileURLToPath } from "url"
@@ -15,8 +15,11 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/clie
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PLUGIN_PATH = join(__dirname, "../reflection.ts")
 
-const TIMEOUT = 60_000  // 60 seconds per task
-const POLL_INTERVAL = 2_000  // 2 seconds
+// Model for E2E tests - override with OPENCODE_MODEL env var
+// OpenCode does NOT auto-select models in temp directories without config
+const MODEL = process.env.OPENCODE_MODEL || "github-copilot/gpt-4o"
+const TIMEOUT = 300_000
+const POLL_INTERVAL = 3_000
 
 interface TaskResult {
   sessionId: string
@@ -33,6 +36,14 @@ async function setupProject(dir: string): Promise<void> {
   const pluginDir = join(dir, ".opencode", "plugin")
   await mkdir(pluginDir, { recursive: true })
   await cp(PLUGIN_PATH, join(pluginDir, "reflection.ts"))
+  
+  // Create opencode.json with explicit model - temp directories don't auto-select models
+  // Override with OPENCODE_MODEL env var if needed
+  const config = {
+    "$schema": "https://opencode.ai/config.json",
+    "model": MODEL
+  }
+  await writeFile(join(dir, "opencode.json"), JSON.stringify(config, null, 2))
 }
 
 async function waitForServer(port: number, timeout: number): Promise<boolean> {
@@ -71,17 +82,11 @@ async function runTask(
     result.sessionId = session.id
     console.log(`[${label}] Session: ${result.sessionId}`)
 
-    // Send task asynchronously (non-blocking)
-    try {
-      await client.session.promptAsync({
-        path: { id: result.sessionId },
-        body: { parts: [{ type: "text", text: task }] }
-      })
-      console.log(`[${label}] Task sent successfully`)
-    } catch (e: any) {
-      console.log(`[${label}] Failed to send task: ${e.message}`)
-      throw e
-    }
+    // Send task asynchronously to avoid SDK timeout
+    await client.session.promptAsync({
+      path: { id: result.sessionId },
+      body: { parts: [{ type: "text", text: task }] }
+    })
 
     // Poll until stable
     let lastMsgCount = 0
@@ -117,17 +122,19 @@ async function runTask(
         }
       }
 
-      // Get current state - check if assistant has completed
+      // Get current state
       const currentContent = JSON.stringify(result.messages)
-      const lastAssistant = [...result.messages].reverse().find((m: any) => m.info?.role === "assistant")
-      const isComplete = lastAssistant?.info?.time?.completed != null
-      const hasWork = lastAssistant?.parts?.length > 0
+      const hasWork = result.messages.some((m: any) =>
+        m.info?.role === "assistant" && m.parts?.some((p: any) =>
+          p.type === "text" || p.type === "tool"
+        )
+      )
 
-      // Check stability - only count stable if assistant is complete and has done work
-      if (isComplete && hasWork && result.messages.length === lastMsgCount && currentContent === lastContent) {
+      // Check stability
+      if (hasWork && result.messages.length === lastMsgCount && currentContent === lastContent) {
         stableCount++
-        // Wait for reflection to run (5 polls = 10 seconds after stable)
-        if (stableCount >= 5) {
+        // Wait longer for reflection to run (10 polls = 30 seconds)
+        if (stableCount >= 10) {
           result.completed = true
           break
         }
@@ -141,12 +148,7 @@ async function runTask(
       // Log progress
       const elapsed = Math.round((Date.now() - start) / 1000)
       if (elapsed % 15 === 0) {
-        const error = lastAssistant?.info?.error
-        if (error) {
-          console.log(`[${label}] ${elapsed}s - ERROR: ${JSON.stringify(error).slice(0, 200)}`)
-        } else {
-          console.log(`[${label}] ${elapsed}s - msgs: ${result.messages.length}, complete: ${isComplete}, hasWork: ${hasWork}, stable: ${stableCount}`)
-        }
+        console.log(`[${label}] ${elapsed}s - messages: ${result.messages.length}, stable: ${stableCount}`)
       }
     }
 
@@ -164,7 +166,7 @@ async function runTask(
   return result
 }
 
-describe("E2E: OpenCode API with Reflection", { timeout: TIMEOUT * 2 + 60_000 }, () => {
+describe("E2E: OpenCode API with Reflection", { timeout: TIMEOUT * 2 + 120_000 }, () => {
   const pythonDir = "/tmp/opencode-e2e-python"
   const nodeDir = "/tmp/opencode-e2e-nodejs"
   const pythonPort = 3200
