@@ -15,9 +15,8 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/clie
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PLUGIN_PATH = join(__dirname, "../reflection.ts")
 
-const MODEL = process.env.OPENCODE_MODEL || "anthropic/claude-sonnet-4-5"
-const TIMEOUT = 300_000
-const POLL_INTERVAL = 3_000
+const TIMEOUT = 60_000  // 60 seconds per task
+const POLL_INTERVAL = 2_000  // 2 seconds
 
 interface TaskResult {
   sessionId: string
@@ -72,11 +71,17 @@ async function runTask(
     result.sessionId = session.id
     console.log(`[${label}] Session: ${result.sessionId}`)
 
-    // Send task (use prompt, not promptAsync, to trigger LLM response)
-    await client.session.prompt({
-      path: { id: result.sessionId },
-      body: { parts: [{ type: "text", text: task }] }
-    })
+    // Send task asynchronously (non-blocking)
+    try {
+      await client.session.promptAsync({
+        path: { id: result.sessionId },
+        body: { parts: [{ type: "text", text: task }] }
+      })
+      console.log(`[${label}] Task sent successfully`)
+    } catch (e: any) {
+      console.log(`[${label}] Failed to send task: ${e.message}`)
+      throw e
+    }
 
     // Poll until stable
     let lastMsgCount = 0
@@ -112,19 +117,17 @@ async function runTask(
         }
       }
 
-      // Get current state
+      // Get current state - check if assistant has completed
       const currentContent = JSON.stringify(result.messages)
-      const hasWork = result.messages.some((m: any) =>
-        m.info?.role === "assistant" && m.parts?.some((p: any) =>
-          p.type === "text" || p.type === "tool"
-        )
-      )
+      const lastAssistant = [...result.messages].reverse().find((m: any) => m.info?.role === "assistant")
+      const isComplete = lastAssistant?.info?.time?.completed != null
+      const hasWork = lastAssistant?.parts?.length > 0
 
-      // Check stability
-      if (hasWork && result.messages.length === lastMsgCount && currentContent === lastContent) {
+      // Check stability - only count stable if assistant is complete and has done work
+      if (isComplete && hasWork && result.messages.length === lastMsgCount && currentContent === lastContent) {
         stableCount++
-        // Wait longer for reflection to run (10 polls = 30 seconds)
-        if (stableCount >= 10) {
+        // Wait for reflection to run (5 polls = 10 seconds after stable)
+        if (stableCount >= 5) {
           result.completed = true
           break
         }
@@ -138,7 +141,12 @@ async function runTask(
       // Log progress
       const elapsed = Math.round((Date.now() - start) / 1000)
       if (elapsed % 15 === 0) {
-        console.log(`[${label}] ${elapsed}s - messages: ${result.messages.length}, stable: ${stableCount}`)
+        const error = lastAssistant?.info?.error
+        if (error) {
+          console.log(`[${label}] ${elapsed}s - ERROR: ${JSON.stringify(error).slice(0, 200)}`)
+        } else {
+          console.log(`[${label}] ${elapsed}s - msgs: ${result.messages.length}, complete: ${isComplete}, hasWork: ${hasWork}, stable: ${stableCount}`)
+        }
       }
     }
 
@@ -156,7 +164,7 @@ async function runTask(
   return result
 }
 
-describe("E2E: OpenCode API with Reflection", { timeout: TIMEOUT * 2 + 120_000 }, () => {
+describe("E2E: OpenCode API with Reflection", { timeout: TIMEOUT * 2 + 60_000 }, () => {
   const pythonDir = "/tmp/opencode-e2e-python"
   const nodeDir = "/tmp/opencode-e2e-nodejs"
   const pythonPort = 3200
@@ -181,7 +189,7 @@ describe("E2E: OpenCode API with Reflection", { timeout: TIMEOUT * 2 + 120_000 }
     // Start servers
     console.log("Starting OpenCode servers...")
 
-    pythonServer = spawn("opencode", ["serve", "-p", String(pythonPort)], {
+    pythonServer = spawn("opencode", ["serve", "--port", String(pythonPort)], {
       cwd: pythonDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env }
@@ -202,7 +210,7 @@ describe("E2E: OpenCode API with Reflection", { timeout: TIMEOUT * 2 + 120_000 }
       }
     })
 
-    nodeServer = spawn("opencode", ["serve", "-p", String(nodePort)], {
+    nodeServer = spawn("opencode", ["serve", "--port", String(nodePort)], {
       cwd: nodeDir,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env }

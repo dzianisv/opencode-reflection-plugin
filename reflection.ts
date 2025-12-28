@@ -10,10 +10,14 @@ import { readFile } from "fs/promises"
 import { join } from "path"
 
 const MAX_ATTEMPTS = 3
+const JUDGE_RESPONSE_TIMEOUT = 180_000  // 3 minutes for slow models like Opus 4.5
+const POLL_INTERVAL = 2_000  // 2 seconds between polls
 
 export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
   const attempts = new Map<string, number>()
   const judgeSessionIds = new Set<string>()
+
+  console.log("[Reflection] Plugin initialized")
 
   // Helper to show toast notifications in OpenCode UI
   async function showToast(message: string, variant: "info" | "success" | "warning" | "error" = "info") {
@@ -88,6 +92,44 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
     return { task, result, tools: tools.slice(-10).join("\n") }
   }
 
+  // Poll for judge session response with timeout
+  async function waitForJudgeResponse(client: any, sessionId: string, timeout: number): Promise<string | null> {
+    const start = Date.now()
+    let lastMessageCount = 0
+
+    while (Date.now() - start < timeout) {
+      await new Promise(r => setTimeout(r, POLL_INTERVAL))
+
+      try {
+        const { data: messages } = await client.session.messages({ path: { id: sessionId } })
+        if (!messages) continue
+
+        // Check if we have an assistant response
+        for (const msg of messages) {
+          if (msg.info?.role === "assistant") {
+            for (const part of msg.parts || []) {
+              if (part.type === "text" && part.text) {
+                // Found assistant response with text
+                return part.text
+              }
+            }
+          }
+        }
+
+        // Check for stability (no new messages)
+        if (messages.length === lastMessageCount && messages.length > 1) {
+          // Session seems stable but no assistant text found
+          continue
+        }
+        lastMessageCount = messages.length
+      } catch (e) {
+        // Continue polling on error
+      }
+    }
+
+    return null  // Timeout
+  }
+
   async function judge(sessionId: string): Promise<void> {
     // Skip if already judging or max attempts reached
     if (judgeSessionIds.has(sessionId)) return
@@ -112,6 +154,7 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
     if (!judgeSession?.id) return
 
     judgeSessionIds.add(judgeSession.id)
+    console.log(`[Reflection] Starting reflection for session ${sessionId} (judge: ${judgeSession.id})`)
 
     try {
       const prompt = `TASK VERIFICATION
@@ -133,21 +176,18 @@ Evaluate if this task is COMPLETE. Reply with JSON only:
   "feedback": "If incomplete: specific issues to fix. If complete: brief summary of what was accomplished."
 }`
 
-      // Send prompt and wait for response
-      const { data: response } = await client.session.prompt({
+      // Send prompt asynchronously (non-blocking)
+      await client.session.promptAsync({
         path: { id: judgeSession.id },
         body: { parts: [{ type: "text", text: prompt }] }
       })
 
-      // Extract judge response
-      let judgeText = ""
-      const msgs = Array.isArray(response) ? response : [response]
-      for (const msg of msgs) {
-        if (msg?.info?.role === "assistant") {
-          for (const part of msg.parts || []) {
-            if (part.type === "text") judgeText = (part as any).text || ""
-          }
-        }
+      // Poll for judge response with timeout
+      const judgeText = await waitForJudgeResponse(client, judgeSession.id, JUDGE_RESPONSE_TIMEOUT)
+      if (!judgeText) {
+        console.log("[Reflection] Judge timed out or no response")
+        await showToast("Judge evaluation timed out", "warning")
+        return
       }
 
       // Parse JSON response
@@ -167,9 +207,10 @@ Evaluate if this task is COMPLETE. Reply with JSON only:
 
         // Show toast notification
         await showToast(`Task incomplete (${attemptCount + 1}/${MAX_ATTEMPTS})`, "warning")
+        console.log(`[Reflection] INCOMPLETE - sending feedback (attempt ${attemptCount + 1}/${MAX_ATTEMPTS})`)
 
-        // Send actionable feedback to continue the task
-        await client.session.prompt({
+        // Send actionable feedback to continue the task (async, triggers agent response)
+        await client.session.promptAsync({
           path: { id: sessionId },
           body: {
             parts: [{
@@ -185,9 +226,10 @@ Please address the above issues and continue working on the task.`
       } else {
         // Show success toast
         await showToast("Task complete ✓", "success")
+        console.log("[Reflection] COMPLETE - task verified")
 
-        // Task complete - send summary as confirmation
-        await client.session.prompt({
+        // Task complete - send summary as confirmation (async)
+        await client.session.promptAsync({
           path: { id: sessionId },
           body: {
             parts: [{
