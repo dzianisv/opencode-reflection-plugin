@@ -173,23 +173,34 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
       return
     }
 
-    // Mark as currently reflecting to prevent concurrent reflections
-    reflectingSessions.add(sessionId)
-    console.log(`[Reflection] Starting judge for ${sessionId.slice(0, 20)}... (attempt ${attemptCount + 1})`)
-
-    // Get session messages
+    // Get session messages EARLY to detect judge sessions by content
+    // This is critical because in-memory Sets don't work across processes
     let messages: any[]
     try {
       const { data } = await client.session.messages({ path: { id: sessionId } })
       messages = data || []
       if (messages.length < 2) {
-        reflectingSessions.delete(sessionId)
         return
       }
     } catch (e) {
-      reflectingSessions.delete(sessionId)
       return
     }
+
+    // Check if this is a judge session by looking for TASK VERIFICATION in messages
+    // This handles the case where sessions are created by other plugin instances
+    for (const msg of messages) {
+      for (const part of msg.parts || []) {
+        if (part.type === "text" && part.text?.includes("TASK VERIFICATION")) {
+          // This is a judge session - mark it and skip
+          completedSessions.add(sessionId)
+          return
+        }
+      }
+    }
+
+    // Mark as currently reflecting to prevent concurrent reflections
+    reflectingSessions.add(sessionId)
+    console.log(`[Reflection] Starting judge for ${sessionId.slice(0, 20)}... (attempt ${attemptCount + 1})`)
 
     const extracted = extractFromMessages(messages)
     if (!extracted) {
