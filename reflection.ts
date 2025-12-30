@@ -244,6 +244,8 @@ Evaluate if this task is COMPLETE. Reply with JSON only:
       if (!judgeText) {
         console.log("[Reflection] Judge timed out or no response")
         await showToast("Judge evaluation timed out", "warning")
+        // Mark as completed to prevent infinite retries on timeout
+        completedSessions.add(sessionId)
         return
       }
 
@@ -251,6 +253,8 @@ Evaluate if this task is COMPLETE. Reply with JSON only:
       const jsonMatch = judgeText.match(/\{[\s\S]*\}/)
       if (!jsonMatch) {
         await showToast("Failed to parse judge response", "error")
+        // Mark as completed to prevent infinite retries on parse error
+        completedSessions.add(sessionId)
         return
       }
 
@@ -284,20 +288,23 @@ Please address the above issues and continue working on the task.`
           }
         })
       } else {
+        // Task complete - mark as completed FIRST to prevent any race conditions
+        // This must happen before any async operations to block concurrent idle events
+        completedSessions.add(sessionId)
+        attempts.delete(sessionId)
+        lastFeedbackTime.delete(sessionId)
+
         // Task complete - only show toast, do NOT call prompt()
         // Calling prompt() on complete tasks creates an infinite loop:
         // agent responds → session.idle → reflection → "complete" → prompt() → agent responds → ...
         await showToast(`Task complete ✓ ${feedback.slice(0, 50)}...`, "success")
         console.log(`[Reflection] COMPLETE - task verified: ${feedback.slice(0, 100)}`)
-
-        // Mark as completed so we don't reflect again
-        completedSessions.add(sessionId)
-        attempts.delete(sessionId)
-        lastFeedbackTime.delete(sessionId)
       }
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : String(e)
       await showToast(`Reflection error: ${errorMsg}`, "error")
+      // Mark as completed to prevent infinite retries on error
+      completedSessions.add(sessionId)
     } finally {
       judgeSessionIds.delete(judgeSession.id)
       reflectingSessions.delete(sessionId)
