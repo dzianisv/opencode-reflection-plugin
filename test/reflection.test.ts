@@ -52,7 +52,7 @@ describe("Reflection Plugin - Structure Validation", () => {
   })
 
   it("has judge session tracking", () => {
-    assert.ok(pluginContent.includes("judgeSessionIds"), "Missing judgeSessionIds set")
+    assert.ok(pluginContent.includes("processedSessions"), "Missing processedSessions set")
   })
 
   it("has attempt limiting", () => {
@@ -69,7 +69,7 @@ describe("Reflection Plugin - Structure Validation", () => {
     assert.ok(pluginContent.includes("TASK VERIFICATION"), "Missing judge prompt marker")
   })
 
-  it("cleans up judge sessions", () => {
-    assert.ok(pluginContent.includes("judgeSessionIds.delete"), "Missing cleanup")
+  it("cleans up sessions", () => {
+    assert.ok(pluginContent.includes("processedSessions.add"), "Missing cleanup")
   })
 })
