@@ -1,9 +1,46 @@
-# OpenCode Reflection Plugin
+# OpenCode Plugins
+
 <img width="1250" height="1304" alt="image" src="https://github.com/user-attachments/assets/87485f92-2117-47bd-ace2-b6bf217be800" />
 <img width="1276" height="1403" alt="image" src="https://github.com/user-attachments/assets/7a08c451-b7b3-46b8-b694-6b3f6f4071a5" />
 
+A collection of plugins for [OpenCode](https://github.com/sst/opencode):
 
-A plugin for [OpenCode](https://github.com/sst/opencode) that implements a **reflection/judge layer** to verify task completion and force the agent to continue if work is incomplete.
+1. **reflection.ts** - A reflection/judge layer that verifies task completion and forces the agent to continue if work is incomplete
+2. **tts.ts** - Text-to-speech plugin that reads agent responses aloud (macOS)
+
+---
+
+## TTS Plugin
+
+Reads the final agent response aloud when a session completes using macOS native TTS.
+
+### Features
+- Uses native macOS `say` command (no dependencies)
+- Cleans markdown, code blocks, URLs from text before speaking
+- Truncates long messages (1000 char limit)
+- Skips judge/reflection sessions
+- Tracks sessions to prevent duplicate speech
+
+### Installation
+
+```bash
+mkdir -p ~/.config/opencode/plugin && \
+curl -fsSL -o ~/.config/opencode/plugin/tts.ts \
+  https://raw.githubusercontent.com/dzianisv/opencode-reflection-plugin/main/tts.ts
+```
+
+Then restart OpenCode.
+
+### Customization
+
+Edit constants in `tts.ts`:
+- `MAX_SPEECH_LENGTH`: Max characters to speak (default: 1000)
+- `-r 200`: Speaking rate in words per minute
+- Add `-v VoiceName` to use specific voice (run `say -v ?` to list available voices)
+
+---
+
+## Reflection Plugin
 
 ## How It Works
 

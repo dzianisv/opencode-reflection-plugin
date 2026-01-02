@@ -1,21 +1,51 @@
-# OpenCode Reflection Plugin - Development Guidelines
+# OpenCode Plugins - Development Guidelines
+
+## Available Plugins
+
+1. **reflection.ts** - Judge layer that evaluates task completion and provides feedback
+2. **tts.ts** - Text-to-speech that reads agent responses aloud (macOS)
 
 ## CRITICAL: Plugin Installation Location
 
 **OpenCode loads plugins from `~/.config/opencode/plugin/`, NOT from npm global installs!**
 
 When deploying changes:
-1. Update source: `/Users/engineer/workspace/opencode-reflection-plugin/reflection.ts`
-2. **MUST COPY** to: `~/.config/opencode/plugin/reflection.ts`
+1. Update source files in `/Users/engineer/workspace/opencode-reflection-plugin/`
+2. **MUST COPY** to: `~/.config/opencode/plugin/`
 3. Restart OpenCode for changes to take effect
 
 ```bash
-# Deploy plugin changes
-cp /Users/engineer/workspace/opencode-reflection-plugin/reflection.ts ~/.config/opencode/plugin/reflection.ts
+# Deploy all plugin changes
+cp /Users/engineer/workspace/opencode-reflection-plugin/reflection.ts ~/.config/opencode/plugin/
+cp /Users/engineer/workspace/opencode-reflection-plugin/tts.ts ~/.config/opencode/plugin/
 # Then restart opencode
 ```
 
 The npm global install (`npm install -g`) is NOT used by OpenCode - it reads directly from the config directory.
+
+## TTS Plugin (`tts.ts`)
+
+### Overview
+Reads the final agent response aloud when a session completes using macOS `say` command.
+
+### Features
+- Uses native macOS TTS (no dependencies)
+- Cleans markdown/code from text before speaking
+- Truncates long messages (1000 char limit)
+- Skips judge/reflection sessions
+- Tracks sessions to prevent duplicate speech
+
+### Customization
+Edit constants in `tts.ts`:
+- `MAX_SPEECH_LENGTH`: Max characters to speak (default: 1000)
+- `-r 200`: Speaking rate in words per minute
+- Add `-v VoiceName` to use specific voice (run `say -v ?` to list)
+
+### Testing
+```bash
+npm run test:tts        # Unit tests
+npm run test:tts:manual # Actually speaks test phrases
+```
 
 ## Plugin Architecture
 

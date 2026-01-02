@@ -5,10 +5,12 @@
   "description": "OpenCode plugin that implements a reflection/judge layer to verify task completion",
   "main": "reflection.ts",
   "scripts": {
-    "test": "node --experimental-strip-types --test test/reflection.test.ts",
+    "test": "node --experimental-strip-types --test test/reflection.test.ts test/tts.test.ts",
+    "test:tts": "node --experimental-strip-types --test test/tts.test.ts",
     "test:e2e": "node --experimental-strip-types --test test/e2e.test.ts",
+    "test:tts:manual": "node --experimental-strip-types test/tts-manual.ts",
     "typecheck": "npx tsc --noEmit",
-    "install:global": "mkdir -p ~/.config/opencode/plugin && cp reflection.ts ~/.config/opencode/plugin/"
+    "install:global": "mkdir -p ~/.config/opencode/plugin && cp reflection.ts tts.ts ~/.config/opencode/plugin/"
   },
   "keywords": [
     "opencode",
