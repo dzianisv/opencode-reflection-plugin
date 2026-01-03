@@ -154,7 +154,7 @@ describe("TTS Plugin - Engine Configuration", () => {
 
   it("implements automatic fallback", () => {
     assert.ok(pluginContent.includes("isChatterboxAvailable"), "Missing availability check")
-    assert.ok(pluginContent.includes("falling back to OS TTS"), "Missing fallback logic")
+    assert.ok(pluginContent.includes("speakWithOS"), "Missing OS TTS fallback")
   })
 
   it("has Chatterbox configuration options", () => {
