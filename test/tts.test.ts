@@ -86,7 +86,7 @@ describe("TTS Plugin - Structure Validation", () => {
     assert.ok(pluginContent.includes("export default"), "Missing default export")
   })
 
-  it("uses macOS say command", () => {
+  it("uses macOS say command for OS TTS", () => {
     assert.ok(pluginContent.includes("say"), "Missing say command")
     assert.ok(pluginContent.includes("execAsync"), "Missing exec for say command")
   })
@@ -123,6 +123,102 @@ describe("TTS Plugin - Structure Validation", () => {
   })
 })
 
+describe("TTS Plugin - Engine Configuration", () => {
+  let pluginContent: string
+
+  before(async () => {
+    pluginContent = await readFile(
+      join(__dirname, "../tts.ts"),
+      "utf-8"
+    )
+  })
+
+  it("supports chatterbox engine", () => {
+    assert.ok(pluginContent.includes("chatterbox"), "Missing chatterbox engine")
+    assert.ok(pluginContent.includes("ChatterboxTTS"), "Missing ChatterboxTTS reference")
+  })
+
+  it("supports OS TTS engine", () => {
+    assert.ok(pluginContent.includes("speakWithOS"), "Missing OS TTS function")
+    assert.ok(pluginContent.includes('TTS_ENGINE === "os"') || pluginContent.includes('"os"'), "Missing OS engine option")
+  })
+
+  it("has engine type definition", () => {
+    assert.ok(pluginContent.includes("TTSEngine"), "Missing TTSEngine type")
+    assert.ok(pluginContent.includes('"chatterbox" | "os"'), "Missing engine type union")
+  })
+
+  it("supports TTS_ENGINE env var", () => {
+    assert.ok(pluginContent.includes("process.env.TTS_ENGINE"), "Missing TTS_ENGINE env var check")
+  })
+
+  it("implements automatic fallback", () => {
+    assert.ok(pluginContent.includes("isChatterboxAvailable"), "Missing availability check")
+    assert.ok(pluginContent.includes("falling back to OS TTS"), "Missing fallback logic")
+  })
+
+  it("has Chatterbox configuration options", () => {
+    assert.ok(pluginContent.includes("chatterbox?:"), "Missing chatterbox config section")
+    assert.ok(pluginContent.includes("device?:"), "Missing device option")
+    assert.ok(pluginContent.includes("voiceRef?:"), "Missing voice reference option")
+    assert.ok(pluginContent.includes("exaggeration?:"), "Missing exaggeration option")
+    assert.ok(pluginContent.includes("useTurbo?:"), "Missing turbo option")
+  })
+
+  it("has Python helper script generation", () => {
+    assert.ok(pluginContent.includes("tts.py"), "Missing Python script path")
+    assert.ok(pluginContent.includes("ensureChatterboxScript"), "Missing script generation function")
+  })
+
+  it("defaults to chatterbox engine", () => {
+    assert.ok(pluginContent.includes('engine: "chatterbox"') || pluginContent.includes('engine || "chatterbox"'), "Chatterbox should be default")
+  })
+})
+
+describe("TTS Plugin - Chatterbox Features", () => {
+  let pluginContent: string
+
+  before(async () => {
+    pluginContent = await readFile(
+      join(__dirname, "../tts.ts"),
+      "utf-8"
+    )
+  })
+
+  it("supports GPU (cuda) and CPU device selection", () => {
+    assert.ok(pluginContent.includes('"cuda"'), "Missing cuda device option")
+    assert.ok(pluginContent.includes('"cpu"'), "Missing cpu device option")
+  })
+
+  it("supports Turbo model variant", () => {
+    assert.ok(pluginContent.includes("--turbo"), "Missing turbo flag")
+    assert.ok(pluginContent.includes("ChatterboxTurboTTS"), "Missing Turbo model import")
+  })
+
+  it("supports voice cloning via reference audio", () => {
+    assert.ok(pluginContent.includes("--voice"), "Missing voice reference flag")
+    assert.ok(pluginContent.includes("audio_prompt_path"), "Missing audio_prompt_path")
+  })
+
+  it("supports emotion exaggeration control", () => {
+    assert.ok(pluginContent.includes("--exaggeration"), "Missing exaggeration flag")
+    assert.ok(pluginContent.includes("exaggeration="), "Missing exaggeration parameter")
+  })
+
+  it("generates WAV files to temp directory", () => {
+    assert.ok(pluginContent.includes("tmpdir()"), "Missing temp directory usage")
+    assert.ok(pluginContent.includes(".wav"), "Missing WAV file extension")
+  })
+
+  it("plays audio with afplay on macOS", () => {
+    assert.ok(pluginContent.includes("afplay"), "Missing afplay for audio playback")
+  })
+
+  it("cleans up temp files after playback", () => {
+    assert.ok(pluginContent.includes("unlink"), "Missing file cleanup")
+  })
+})
+
 describe("TTS Plugin - macOS Integration", () => {
   it("say command is available on macOS", async () => {
     try {
@@ -142,5 +238,28 @@ describe("TTS Plugin - macOS Integration", () => {
     } catch {
       console.log("  [SKIP] say command not available (not macOS)")
     }
+  })
+
+  it("afplay command is available on macOS", async () => {
+    try {
+      await execAsync("which afplay")
+      assert.ok(true, "afplay command found")
+    } catch {
+      console.log("  [SKIP] afplay command not available (not macOS)")
+    }
+  })
+})
+
+describe("TTS Plugin - Chatterbox Availability Check", () => {
+  it("checks Python chatterbox import", async () => {
+    try {
+      await execAsync('python3 -c "import chatterbox; print(\'ok\')"', { timeout: 10000 })
+      console.log("  [INFO] Chatterbox is installed and available")
+    } catch {
+      console.log("  [INFO] Chatterbox not installed - will fall back to OS TTS")
+      console.log("  [INFO] Install with: pip install chatterbox-tts")
+    }
+    // This test always passes - just informational
+    assert.ok(true)
   })
 })

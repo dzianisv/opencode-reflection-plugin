@@ -56,21 +56,79 @@ curl -fsSL -o .opencode/plugin/tts.ts \
 
 ## TTS Plugin
 
-Reads the final agent response aloud when a session completes using macOS native TTS.
+Reads the final agent response aloud when a session completes. Supports multiple TTS engines with automatic fallback.
+
+### TTS Engines
+
+| Engine | Quality | Speed | Requirements |
+|--------|---------|-------|--------------|
+| **Chatterbox** | Excellent - natural, expressive | ~2-5s | Python 3.11, **NVIDIA GPU required** |
+| **OS** (default fallback) | Good | Instant | macOS only |
+
+**Chatterbox** is [Resemble AI's open-source TTS](https://github.com/resemble-ai/chatterbox) - widely regarded as one of the best open-source TTS models, outperforming ElevenLabs in blind tests 63-75% of the time.
+
+> **Note**: Chatterbox requires an NVIDIA GPU with CUDA support. On machines without a GPU, the plugin automatically falls back to OS TTS. Chatterbox on CPU is impractically slow (~3+ minutes per sentence).
 
 ### Features
-- Uses native macOS `say` command (no dependencies)
+- **Automatic setup**: Chatterbox is auto-installed in a virtualenv on first use
+- **GPU auto-detection**: Falls back to OS TTS if no CUDA GPU detected
+- **Chatterbox engine**: High-quality neural TTS with emotion control
+- **OS engine**: Native macOS `say` command (zero dependencies)
 - Cleans markdown, code blocks, URLs from text before speaking
 - Truncates long messages (1000 char limit)
 - Skips judge/reflection sessions
-- Tracks sessions to prevent duplicate speech
 
-### Customization
+### Requirements
 
-Edit `~/.config/opencode/plugin/tts.ts`:
-- `MAX_SPEECH_LENGTH`: Max characters to speak (default: 1000)
+- **Python 3.11** must be installed for Chatterbox (install with `brew install python@3.11`)
+- **NVIDIA GPU** with CUDA for Chatterbox (otherwise falls back to OS TTS)
+- **macOS** for OS TTS fallback
+
+### Configuration
+
+Create/edit `~/.config/opencode/tts.json`:
+
+```json
+{
+  "enabled": true,
+  "engine": "chatterbox",
+  "chatterbox": {
+    "device": "cuda",
+    "useTurbo": true,
+    "exaggeration": 0.5,
+    "voiceRef": "/path/to/voice-sample.wav"
+  }
+}
+```
+
+**Configuration options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable/disable TTS |
+| `engine` | string | `"chatterbox"` | TTS engine: `"chatterbox"` or `"os"` |
+| `chatterbox.device` | string | `"cuda"` | Device: `"cuda"` (GPU) or `"cpu"` |
+| `chatterbox.useTurbo` | boolean | `false` | Use Turbo model (faster, supports paralinguistic tags) |
+| `chatterbox.exaggeration` | number | `0.5` | Emotion intensity (0.0-1.0) |
+| `chatterbox.voiceRef` | string | - | Path to reference audio for voice cloning (5-10s WAV) |
+
+**Environment variables** (override config):
+- `TTS_DISABLED=1` - Disable TTS entirely
+- `TTS_ENGINE=os` - Force OS TTS engine
+
+### Quick Toggle
+
+```
+/tts        Toggle TTS on/off
+/tts on     Enable TTS
+/tts off    Disable TTS
+```
+
+### OS TTS Customization (macOS)
+
+If using OS TTS, you can customize voice settings in `tts.ts`:
 - `-r 200`: Speaking rate in words per minute
-- Add `-v VoiceName` to use specific voice (run `say -v ?` to list available voices)
+- Add `-v VoiceName` to use specific voice (run `say -v ?` to list voices)
 
 ---
 
@@ -194,12 +252,14 @@ ls -lh ~/.config/opencode/plugin/
 ### Known Limitations
 
 - **Reflection**: May timeout with very slow models (>3 min response time)
-- **TTS**: macOS only (uses `say` command)
+- **TTS Chatterbox**: Requires Python 3.11+ and ~2GB VRAM for GPU mode
+- **TTS OS**: macOS only (uses `say` command)
 
 ## Requirements
 
 - OpenCode v1.0+
-- macOS (for TTS plugin)
+- **TTS with Chatterbox**: Python 3.11+, `chatterbox-tts` package, GPU recommended
+- **TTS with OS engine**: macOS
 
 ## License
 
