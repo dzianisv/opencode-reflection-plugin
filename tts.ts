@@ -48,12 +48,18 @@ type TTSEngine = "chatterbox" | "os"
 interface TTSConfig {
   enabled?: boolean
   engine?: TTSEngine
+  // OS TTS options (macOS/Linux)
+  os?: {
+    voice?: string                    // Voice name (e.g., "Samantha", "Alex"). Run `say -v ?` on macOS to list voices
+    rate?: number                     // Speaking rate in words per minute (default: 200)
+  }
   // Chatterbox-specific options
   chatterbox?: {
-    device?: "cuda" | "cpu"           // GPU or CPU (default: cuda, falls back to cpu)
-    voiceRef?: string                 // Path to reference voice clip for cloning
+    device?: "cuda" | "cpu" | "mps"   // GPU, CPU, or Apple Silicon (default: auto-detect)
+    voiceRef?: string                 // Path to reference voice clip for cloning (REQUIRED for custom voice)
     exaggeration?: number             // Emotion exaggeration (0.0-1.0)
-    useTurbo?: boolean                // Use Turbo model for lower latency
+    useTurbo?: boolean                // Use Turbo model for 10x faster inference
+    serverMode?: boolean              // Keep model loaded for fast subsequent requests (default: true)
   }
 }
 
@@ -69,8 +75,15 @@ async function loadConfig(): Promise<TTSConfig> {
     const content = await readFile(TTS_CONFIG_PATH, "utf-8")
     return JSON.parse(content)
   } catch {
-    // Default config
-    return { enabled: true, engine: "chatterbox" }
+    // Default config - use OS TTS with Samantha voice (female, macOS)
+    return { 
+      enabled: true, 
+      engine: "os",
+      os: {
+        voice: "Samantha",
+        rate: 200
+      }
+    }
   }
 }
 
@@ -165,12 +178,17 @@ async function setupChatterbox(): Promise<boolean> {
   }
 }
 
+// Chatterbox server state
+const CHATTERBOX_SERVER_SCRIPT = join(CHATTERBOX_DIR, "tts_server.py")
+const CHATTERBOX_SOCKET = join(CHATTERBOX_DIR, "tts.sock")
+let chatterboxServerProcess: ReturnType<typeof spawn> | null = null
+
 /**
- * Ensure the Chatterbox Python helper script exists
+ * Ensure the Chatterbox Python helper script exists (one-shot mode)
  */
 async function ensureChatterboxScript(): Promise<void> {
   const script = `#!/usr/bin/env python3
-"""Chatterbox TTS helper script for OpenCode."""
+"""Chatterbox TTS helper script for OpenCode (one-shot mode)."""
 import sys
 import argparse
 
@@ -216,6 +234,230 @@ if __name__ == "__main__":
 }
 
 /**
+ * Ensure the Chatterbox TTS server script exists (persistent mode - keeps model loaded)
+ */
+async function ensureChatterboxServerScript(): Promise<void> {
+  const script = `#!/usr/bin/env python3
+"""
+Chatterbox TTS Server for OpenCode.
+Keeps model loaded in memory for fast inference.
+Communicates via Unix socket for low latency.
+"""
+import sys
+import os
+import json
+import socket
+import argparse
+
+def main():
+    parser = argparse.ArgumentParser(description="Chatterbox TTS Server")
+    parser.add_argument("--socket", required=True, help="Unix socket path")
+    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu", "mps"])
+    parser.add_argument("--turbo", action="store_true", help="Use Turbo model (10x faster)")
+    parser.add_argument("--voice", help="Default reference voice audio path")
+    args = parser.parse_args()
+    
+    import torch
+    import torchaudio as ta
+    
+    # Auto-detect best device
+    device = args.device
+    if device == "cuda" and not torch.cuda.is_available():
+        if torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+    
+    print(f"Loading model on {device}...", file=sys.stderr)
+    
+    # Load model once at startup
+    if args.turbo:
+        from chatterbox.tts_turbo import ChatterboxTurboTTS
+        model = ChatterboxTurboTTS.from_pretrained(device=device)
+        print("Turbo model loaded (10x faster inference)", file=sys.stderr)
+    else:
+        from chatterbox.tts import ChatterboxTTS
+        model = ChatterboxTTS.from_pretrained(device=device)
+        print("Standard model loaded", file=sys.stderr)
+    
+    default_voice = args.voice
+    
+    # Remove old socket if exists
+    if os.path.exists(args.socket):
+        os.unlink(args.socket)
+    
+    # Create Unix socket server
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(args.socket)
+    server.listen(1)
+    os.chmod(args.socket, 0o600)
+    
+    print(f"TTS server ready on {args.socket}", file=sys.stderr)
+    sys.stderr.flush()
+    
+    while True:
+        try:
+            conn, _ = server.accept()
+            data = b""
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if b"\\n" in data:
+                    break
+            
+            request = json.loads(data.decode().strip())
+            text = request.get("text", "")
+            output = request.get("output", "/tmp/tts_output.wav")
+            voice = request.get("voice") or default_voice
+            exaggeration = request.get("exaggeration", 0.5)
+            
+            # Generate speech
+            if voice:
+                wav = model.generate(text, audio_prompt_path=voice, exaggeration=exaggeration)
+            else:
+                wav = model.generate(text, exaggeration=exaggeration)
+            
+            ta.save(output, wav, model.sr)
+            
+            conn.sendall(json.dumps({"success": True, "output": output}).encode() + b"\\n")
+            conn.close()
+        except Exception as e:
+            try:
+                conn.sendall(json.dumps({"success": False, "error": str(e)}).encode() + b"\\n")
+                conn.close()
+            except:
+                pass
+
+if __name__ == "__main__":
+    main()
+`
+  await writeFile(CHATTERBOX_SERVER_SCRIPT, script, { mode: 0o755 })
+}
+
+/**
+ * Start the Chatterbox TTS server (keeps model loaded for fast inference)
+ */
+async function startChatterboxServer(config: TTSConfig): Promise<boolean> {
+  if (chatterboxServerProcess) {
+    // Check if still running
+    try {
+      await access(CHATTERBOX_SOCKET)
+      return true
+    } catch {
+      // Socket gone, restart server
+      chatterboxServerProcess.kill()
+      chatterboxServerProcess = null
+    }
+  }
+  
+  await ensureChatterboxServerScript()
+  
+  const venvPython = join(CHATTERBOX_VENV, "bin", "python")
+  const opts = config.chatterbox || {}
+  const device = opts.device || "cuda"
+  
+  const args = [
+    CHATTERBOX_SERVER_SCRIPT,
+    "--socket", CHATTERBOX_SOCKET,
+    "--device", device,
+  ]
+  
+  if (opts.useTurbo) {
+    args.push("--turbo")
+  }
+  
+  if (opts.voiceRef) {
+    args.push("--voice", opts.voiceRef)
+  }
+  
+  // Remove old socket
+  try {
+    await unlink(CHATTERBOX_SOCKET)
+  } catch {}
+  
+  chatterboxServerProcess = spawn(venvPython, args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: false,
+  })
+  
+  // Wait for server to be ready (up to 60s for model loading)
+  const startTime = Date.now()
+  while (Date.now() - startTime < 60000) {
+    try {
+      await access(CHATTERBOX_SOCKET)
+      return true
+    } catch {
+      await new Promise(r => setTimeout(r, 500))
+    }
+  }
+  
+  return false
+}
+
+/**
+ * Send TTS request to the running server (fast path)
+ */
+async function speakWithChatterboxServer(text: string, config: TTSConfig): Promise<boolean> {
+  const net = await import("net")
+  const opts = config.chatterbox || {}
+  const outputPath = join(tmpdir(), `opencode_tts_${Date.now()}.wav`)
+  
+  return new Promise((resolve) => {
+    const client = net.createConnection(CHATTERBOX_SOCKET, () => {
+      const request = JSON.stringify({
+        text,
+        output: outputPath,
+        voice: opts.voiceRef,
+        exaggeration: opts.exaggeration ?? 0.5,
+      }) + "\n"
+      client.write(request)
+    })
+    
+    let response = ""
+    client.on("data", (data) => {
+      response += data.toString()
+    })
+    
+    client.on("end", async () => {
+      try {
+        const result = JSON.parse(response.trim())
+        if (!result.success) {
+          resolve(false)
+          return
+        }
+        
+        // Play audio
+        if (platform() === "darwin") {
+          await execAsync(`afplay "${outputPath}"`)
+        } else {
+          try {
+            await execAsync(`paplay "${outputPath}"`)
+          } catch {
+            await execAsync(`aplay "${outputPath}"`)
+          }
+        }
+        await unlink(outputPath).catch(() => {})
+        resolve(true)
+      } catch {
+        resolve(false)
+      }
+    })
+    
+    client.on("error", () => {
+      resolve(false)
+    })
+    
+    // Timeout
+    setTimeout(() => {
+      client.destroy()
+      resolve(false)
+    }, 120000)
+  })
+}
+
+/**
  * Check if Chatterbox is available for use
  */
 async function isChatterboxAvailable(config: TTSConfig): Promise<boolean> {
@@ -233,8 +475,21 @@ async function isChatterboxAvailable(config: TTSConfig): Promise<boolean> {
  * Speak using Chatterbox TTS
  */
 async function speakWithChatterbox(text: string, config: TTSConfig): Promise<boolean> {
-  const venvPython = join(CHATTERBOX_VENV, "bin", "python")
   const opts = config.chatterbox || {}
+  const useServer = opts.serverMode !== false  // Default to server mode for speed
+  
+  // Try server mode first (fast path - model stays loaded)
+  if (useServer) {
+    const serverReady = await startChatterboxServer(config)
+    if (serverReady) {
+      const success = await speakWithChatterboxServer(text, config)
+      if (success) return true
+      // Server failed, fall through to one-shot mode
+    }
+  }
+  
+  // One-shot mode (slower - reloads model each time)
+  const venvPython = join(CHATTERBOX_VENV, "bin", "python")
   const device = opts.device || "cuda"
   const outputPath = join(tmpdir(), `opencode_tts_${Date.now()}.wav`)
   
@@ -301,14 +556,19 @@ async function speakWithChatterbox(text: string, config: TTSConfig): Promise<boo
 }
 
 /**
- * Speak using OS TTS (macOS `say` command)
+ * Speak using OS TTS (macOS `say` command, Linux espeak)
  */
-async function speakWithOS(text: string): Promise<boolean> {
+async function speakWithOS(text: string, config: TTSConfig): Promise<boolean> {
   const escaped = text.replace(/'/g, "'\\''")
+  const opts = config.os || {}
+  const voice = opts.voice || "Samantha"  // Female voice by default
+  const rate = opts.rate || 200
+  
   try {
     if (platform() === "darwin") {
-      await execAsync(`say -r 200 '${escaped}'`)
+      await execAsync(`say -v "${voice}" -r ${rate} '${escaped}'`)
     } else {
+      // Linux: espeak
       await execAsync(`espeak '${escaped}'`)
     }
     return true
@@ -364,7 +624,7 @@ export const TTSPlugin: Plugin = async ({ client, directory }) => {
     }
     
     // OS TTS (fallback or explicit choice)
-    await speakWithOS(toSpeak)
+    await speakWithOS(toSpeak, config)
   }
 
   function isSessionComplete(messages: any[]): boolean {

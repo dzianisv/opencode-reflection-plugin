@@ -170,8 +170,10 @@ describe("TTS Plugin - Engine Configuration", () => {
     assert.ok(pluginContent.includes("ensureChatterboxScript"), "Missing script generation function")
   })
 
-  it("defaults to chatterbox engine", () => {
-    assert.ok(pluginContent.includes('engine: "chatterbox"') || pluginContent.includes('engine || "chatterbox"'), "Chatterbox should be default")
+  it("defaults to OS TTS with Samantha voice", () => {
+    // Default is now OS TTS (Samantha voice on macOS) for out-of-box female voice experience
+    assert.ok(pluginContent.includes('engine: "os"'), "OS TTS should be default")
+    assert.ok(pluginContent.includes('voice: "Samantha"'), "Samantha should be default voice")
   })
 })
 
@@ -216,6 +218,23 @@ describe("TTS Plugin - Chatterbox Features", () => {
 
   it("cleans up temp files after playback", () => {
     assert.ok(pluginContent.includes("unlink"), "Missing file cleanup")
+  })
+
+  it("supports server mode for persistent model loading", () => {
+    assert.ok(pluginContent.includes("serverMode"), "Missing serverMode option")
+    assert.ok(pluginContent.includes("tts_server.py"), "Missing server script")
+    assert.ok(pluginContent.includes("startChatterboxServer"), "Missing server start function")
+    assert.ok(pluginContent.includes("speakWithChatterboxServer"), "Missing server speak function")
+  })
+
+  it("uses Unix socket for fast IPC with server", () => {
+    assert.ok(pluginContent.includes("tts.sock"), "Missing socket path")
+    assert.ok(pluginContent.includes("AF_UNIX"), "Missing Unix socket in server script")
+  })
+
+  it("supports Apple Silicon (MPS) device", () => {
+    assert.ok(pluginContent.includes('"mps"'), "Missing MPS device option")
+    assert.ok(pluginContent.includes("torch.backends.mps.is_available"), "Missing MPS detection")
   })
 })
 
