@@ -555,11 +555,13 @@ async function isChatterboxAvailable(config: TTSConfig): Promise<boolean> {
   const installed = await setupChatterbox()
   if (!installed) return false
   
-  const hasGpu = await checkCudaAvailable()
-  const forceCpu = config.chatterbox?.device === "cpu"
+  const device = config.chatterbox?.device || "cuda"
   
-  // Use Chatterbox if we have GPU or CPU is explicitly requested
-  return hasGpu || forceCpu
+  // Allow if device is explicitly set to cpu or mps (Apple Silicon)
+  if (device === "cpu" || device === "mps") return true
+  
+  // For cuda, check if it's actually available
+  return await checkCudaAvailable()
 }
 
 /**
