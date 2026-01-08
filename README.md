@@ -22,6 +22,26 @@ curl -fsSL -o ~/.config/opencode/plugin/tts.ts \
   https://raw.githubusercontent.com/dzianisv/opencode-reflection-plugin/main/tts.ts
 ```
 
+**Optional - create TTS config (recommended for Apple Silicon users):**
+```bash
+cat > ~/.config/opencode/tts.json << 'EOF'
+{
+  "enabled": true,
+  "engine": "chatterbox",
+  "os": {
+    "voice": "Samantha",
+    "rate": 200
+  },
+  "chatterbox": {
+    "device": "mps",
+    "useTurbo": true,
+    "serverMode": true,
+    "exaggeration": 0.5
+  }
+}
+EOF
+```
+
 Then restart OpenCode.
 
 ### Install Individual Plugins
