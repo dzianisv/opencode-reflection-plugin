@@ -196,7 +196,7 @@ def main():
     parser = argparse.ArgumentParser(description="Chatterbox TTS")
     parser.add_argument("text", help="Text to synthesize")
     parser.add_argument("--output", "-o", required=True, help="Output WAV file")
-    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    parser.add_argument("--device", default="cuda", choices=["cuda", "mps", "cpu"])
     parser.add_argument("--voice", help="Reference voice audio path")
     parser.add_argument("--exaggeration", type=float, default=0.5)
     parser.add_argument("--turbo", action="store_true", help="Use Turbo model")
@@ -208,6 +208,8 @@ def main():
         
         device = args.device
         if device == "cuda" and not torch.cuda.is_available():
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+        elif device == "mps" and not torch.backends.mps.is_available():
             device = "cpu"
         
         if args.turbo:

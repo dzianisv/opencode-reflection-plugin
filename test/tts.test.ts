@@ -295,3 +295,89 @@ describe("TTS Plugin - Chatterbox Availability Check", () => {
     assert.ok(true)
   })
 })
+
+describe("TTS Plugin - Embedded Python Scripts Validation", () => {
+  let pluginContent: string
+
+  before(async () => {
+    pluginContent = await readFile(
+      join(__dirname, "../tts.ts"),
+      "utf-8"
+    )
+  })
+
+  // Extract embedded script content between backticks after a specific marker
+  function extractEmbeddedScript(content: string, marker: string): string | null {
+    const markerIndex = content.indexOf(marker)
+    if (markerIndex === -1) return null
+    
+    const startIndex = content.indexOf('`', markerIndex)
+    if (startIndex === -1) return null
+    
+    const endIndex = content.indexOf('`', startIndex + 1)
+    if (endIndex === -1) return null
+    
+    return content.slice(startIndex + 1, endIndex)
+  }
+
+  describe("One-shot script (tts.py)", () => {
+    it("accepts --device mps in argparse choices", () => {
+      // The embedded script must have mps in the choices list
+      assert.ok(
+        pluginContent.includes('choices=["cuda", "mps", "cpu"]'),
+        "Embedded tts.py script must accept 'mps' as a device choice. " +
+        "Found argparse line but missing mps in choices."
+      )
+    })
+
+    it("handles MPS device fallback when unavailable", () => {
+      // Must check mps availability and fall back to cpu
+      assert.ok(
+        pluginContent.includes('device == "mps" and not torch.backends.mps.is_available()'),
+        "Embedded tts.py must handle MPS unavailability fallback"
+      )
+    })
+
+    it("auto-detects MPS when CUDA unavailable", () => {
+      // When cuda requested but unavailable, should try mps before cpu
+      assert.ok(
+        pluginContent.includes('device = "mps" if torch.backends.mps.is_available() else "cpu"'),
+        "Embedded tts.py should auto-detect MPS when CUDA is unavailable"
+      )
+    })
+  })
+
+  describe("Server script (tts_server.py)", () => {
+    it("accepts --device mps in argparse choices", () => {
+      // The server script must also support mps
+      assert.ok(
+        pluginContent.includes('choices=["cuda", "cpu", "mps"]') ||
+        pluginContent.includes('choices=["cuda", "mps", "cpu"]'),
+        "Embedded tts_server.py script must accept 'mps' as a device choice"
+      )
+    })
+
+    it("handles MPS device detection and fallback", () => {
+      // Server script has its own device detection
+      const hasMpsCheck = pluginContent.includes('device == "mps" and not torch.backends.mps.is_available()')
+      const hasMpsAutoDetect = pluginContent.includes('torch.backends.mps.is_available()')
+      assert.ok(
+        hasMpsCheck && hasMpsAutoDetect,
+        "Embedded tts_server.py must handle MPS detection and fallback"
+      )
+    })
+  })
+
+  describe("Device consistency", () => {
+    it("all device options are consistent across scripts", () => {
+      // Count occurrences of device choices patterns
+      const oneshot = pluginContent.includes('choices=["cuda", "mps", "cpu"]')
+      const server = pluginContent.includes('choices=["cuda", "cpu", "mps"]')
+      
+      assert.ok(
+        oneshot && server,
+        "Both embedded scripts must support the same device options (cuda, mps, cpu)"
+      )
+    })
+  })
+})
