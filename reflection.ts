@@ -6,27 +6,47 @@
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
-import { readFile } from "fs/promises"
+import { readFile, writeFile, mkdir } from "fs/promises"
 import { join } from "path"
 
 const MAX_ATTEMPTS = 3
 const JUDGE_RESPONSE_TIMEOUT = 180_000
 const POLL_INTERVAL = 2_000
 
-// Logging disabled to avoid breaking CLI output
-// Enable for debugging: uncomment the console.log line
-function log(_msg: string) {
-  // console.log(`[Reflection] ${_msg}`)
-}
+// No logging to avoid breaking CLI output
 
 export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
-  log("Plugin initialized")
   
   const attempts = new Map<string, number>()
   const lastHumanMsgCount = new Map<string, number>() // Track human message count to detect new input
   const processedSessions = new Set<string>()
   const activeReflections = new Set<string>()
   const abortedSessions = new Set<string>() // Permanently track aborted sessions - never reflect on these
+
+  // Directory for storing reflection input/output
+  const reflectionDir = join(directory, ".reflection")
+
+  async function ensureReflectionDir(): Promise<void> {
+    try {
+      await mkdir(reflectionDir, { recursive: true })
+    } catch {}
+  }
+
+  async function saveReflectionData(sessionId: string, data: {
+    task: string
+    result: string
+    tools: string
+    prompt: string
+    verdict: { complete: boolean; feedback: string } | null
+    timestamp: string
+  }): Promise<void> {
+    await ensureReflectionDir()
+    const filename = `${sessionId.slice(0, 8)}_${Date.now()}.json`
+    const filepath = join(reflectionDir, filename)
+    try {
+      await writeFile(filepath, JSON.stringify(data, null, 2))
+    } catch {}
+  }
 
   async function showToast(message: string, variant: "info" | "success" | "warning" | "error" = "info") {
     try {
@@ -158,11 +178,8 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
   }
 
   async function runReflection(sessionId: string): Promise<void> {
-    log(`Starting reflection for ${sessionId}`)
-    
     // Prevent concurrent reflections
     if (activeReflections.has(sessionId)) {
-      log(`Already reflecting on ${sessionId}`)
       return
     }
     activeReflections.add(sessionId)
@@ -175,14 +192,12 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
       // Skip if session was aborted/cancelled by user (Esc key) - check FIRST
       // This takes priority over everything else
       if (wasSessionAborted(sessionId, messages)) {
-        log(`Session ${sessionId} was aborted, skipping`)
         processedSessions.add(sessionId)
         return
       }
 
       // Skip judge sessions
       if (isJudgeSession(messages)) {
-        log(`Session ${sessionId} is a judge session, skipping`)
         processedSessions.add(sessionId)
         return
       }
@@ -253,17 +268,24 @@ Reply with JSON only:
       }
 
       const verdict = JSON.parse(jsonMatch[0])
-      log(`Verdict for ${sessionId}: ${verdict.complete ? "COMPLETE" : "INCOMPLETE"}`)
+
+      // Save reflection data to .reflection/ directory
+      await saveReflectionData(sessionId, {
+        task: extracted.task,
+        result: extracted.result.slice(0, 2000),
+        tools: extracted.tools || "(none)",
+        prompt,
+        verdict,
+        timestamp: new Date().toISOString()
+      })
 
       if (verdict.complete) {
         // COMPLETE: mark as done, show toast only (no prompt!)
-        log(`Task COMPLETE for ${sessionId}`)
         processedSessions.add(sessionId)
         attempts.delete(sessionId)
         await showToast("Task complete ✓", "success")
       } else {
         // INCOMPLETE: send feedback to continue
-        log(`Task INCOMPLETE for ${sessionId}: ${verdict.feedback}`)
         attempts.set(sessionId, attemptCount + 1)
         await showToast(`Incomplete (${attemptCount + 1}/${MAX_ATTEMPTS})`, "warning")
         

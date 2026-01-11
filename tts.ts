@@ -113,7 +113,13 @@ async function loadConfig(): Promise<TTSConfig> {
   } catch {
     return { 
       enabled: true, 
-      engine: "os",
+      engine: "coqui",
+      coqui: {
+        model: "xtts_v2",
+        device: "mps",
+        language: "en",
+        serverMode: true
+      },
       os: {
         voice: "Samantha",
         rate: 200
@@ -202,11 +208,18 @@ async function findPython311(): Promise<string | null> {
 }
 
 async function findPython3(): Promise<string | null> {
-  const candidates = ["python3", "python3.11", "python3.10", "python3.9", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"]
+  // Coqui TTS requires Python 3.9-3.11 (not 3.12+)
+  const candidates = [
+    "python3.11", "python3.10", "python3.9",
+    "/opt/homebrew/bin/python3.11", "/opt/homebrew/bin/python3.10", "/opt/homebrew/bin/python3.9",
+    "/usr/local/bin/python3.11", "/usr/local/bin/python3.10", "/usr/local/bin/python3.9"
+  ]
   for (const py of candidates) {
     try {
       const { stdout } = await execAsync(`${py} --version 2>/dev/null`)
-      if (stdout.includes("Python 3")) return py
+      if (stdout.includes("Python 3.11") || stdout.includes("Python 3.10") || stdout.includes("Python 3.9")) {
+        return py
+      }
     } catch {
       // Try next
     }
@@ -690,7 +703,8 @@ async function setupCoqui(): Promise<boolean> {
     
     const pip = join(COQUI_VENV, "bin", "pip")
     await execAsync(`"${pip}" install --upgrade pip`, { timeout: 120000 })
-    await execAsync(`"${pip}" install TTS`, { timeout: 600000 })
+    // Pin transformers<4.50 due to breaking API changes in 4.50+
+    await execAsync(`"${pip}" install TTS "transformers<4.50"`, { timeout: 600000 })
     
     await ensureCoquiScript()
     coquiInstalled = true
@@ -721,6 +735,14 @@ def main():
     try:
         import torch
         
+        # Workaround for PyTorch 2.6+ weights_only security change
+        _original_load = torch.load
+        def patched_load(*a, **kw):
+            if 'weights_only' not in kw:
+                kw['weights_only'] = False
+            return _original_load(*a, **kw)
+        torch.load = patched_load
+        
         device = args.device
         if device == "cuda" and not torch.cuda.is_available():
             device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -730,14 +752,14 @@ def main():
         from TTS.api import TTS
         
         if args.model == "bark":
-            # Bark: use random speaker (no reliable preset support)
-            # For voice cloning, use --voice-ref with XTTS instead
-            tts = TTS("tts_models/multilingual/multi-dataset/bark", gpu=(device != "cpu"))
+            # Bark: use random speaker
+            tts = TTS("tts_models/multilingual/multi-dataset/bark")
+            tts = tts.to(device)
             tts.tts_to_file(text=args.text, file_path=args.output)
         elif args.model == "xtts_v2":
-            tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=(device != "cpu"))
+            tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
+            tts = tts.to(device)
             if args.voice_ref:
-                # Voice cloning from reference audio
                 tts.tts_to_file(
                     text=args.text,
                     file_path=args.output,
@@ -745,7 +767,6 @@ def main():
                     language=args.language
                 )
             else:
-                # Use built-in speaker
                 tts.tts_to_file(
                     text=args.text,
                     file_path=args.output,
@@ -753,10 +774,12 @@ def main():
                     language=args.language
                 )
         elif args.model == "tortoise":
-            tts = TTS("tts_models/en/multi-dataset/tortoise-v2", gpu=(device != "cpu"))
+            tts = TTS("tts_models/en/multi-dataset/tortoise-v2")
+            tts = tts.to(device)
             tts.tts_to_file(text=args.text, file_path=args.output)
         elif args.model == "vits":
-            tts = TTS("tts_models/en/ljspeech/vits", gpu=(device != "cpu"))
+            tts = TTS("tts_models/en/ljspeech/vits")
+            tts = tts.to(device)
             tts.tts_to_file(text=args.text, file_path=args.output)
         
     except Exception as e:
@@ -790,30 +813,36 @@ def main():
     
     import torch
     
+    # Workaround for PyTorch 2.6+ weights_only security change
+    _original_load = torch.load
+    def patched_load(*a, **kw):
+        if 'weights_only' not in kw:
+            kw['weights_only'] = False
+        return _original_load(*a, **kw)
+    torch.load = patched_load
+    
     device = args.device
-    use_gpu = device != "cpu"
     if device == "cuda" and not torch.cuda.is_available():
         if torch.backends.mps.is_available():
             device = "mps"
-            use_gpu = True
         else:
             device = "cpu"
-            use_gpu = False
     
     print(f"Loading Coqui TTS model '{args.model}' on {device}...", file=sys.stderr)
     
     from TTS.api import TTS
     
     if args.model == "bark":
-        tts = TTS("tts_models/multilingual/multi-dataset/bark", gpu=use_gpu)
+        tts = TTS("tts_models/multilingual/multi-dataset/bark")
     elif args.model == "xtts_v2":
-        tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=use_gpu)
+        tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2")
     elif args.model == "tortoise":
-        tts = TTS("tts_models/en/multi-dataset/tortoise-v2", gpu=use_gpu)
+        tts = TTS("tts_models/en/multi-dataset/tortoise-v2")
     elif args.model == "vits":
-        tts = TTS("tts_models/en/ljspeech/vits", gpu=use_gpu)
+        tts = TTS("tts_models/en/ljspeech/vits")
     
-    print(f"Model loaded", file=sys.stderr)
+    tts = tts.to(device)
+    print(f"Model loaded on {device}", file=sys.stderr)
     
     if os.path.exists(args.socket):
         os.unlink(args.socket)
@@ -846,7 +875,6 @@ def main():
             language = request.get("language") or args.language
             
             if args.model == "bark":
-                # Bark: random speaker (no reliable preset support)
                 tts.tts_to_file(text=text, file_path=output)
             elif args.model == "xtts_v2":
                 if voice_ref:
@@ -1173,6 +1201,30 @@ async function speakWithOS(text: string, config: TTSConfig): Promise<boolean> {
 // ==================== PLUGIN ====================
 
 export const TTSPlugin: Plugin = async ({ client, directory }) => {
+  // Directory for storing TTS output data
+  const ttsDir = join(directory, ".tts")
+
+  async function ensureTTSDir(): Promise<void> {
+    try {
+      await mkdir(ttsDir, { recursive: true })
+    } catch {}
+  }
+
+  async function saveTTSData(sessionId: string, data: {
+    originalText: string
+    cleanedText: string
+    spokenText: string
+    engine: string
+    timestamp: string
+  }): Promise<void> {
+    await ensureTTSDir()
+    const filename = `${sessionId.slice(0, 8)}_${Date.now()}.json`
+    const filepath = join(ttsDir, filename)
+    try {
+      await writeFile(filepath, JSON.stringify(data, null, 2))
+    } catch {}
+  }
+
   function extractFinalResponse(messages: any[]): string | null {
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]
@@ -1199,7 +1251,7 @@ export const TTSPlugin: Plugin = async ({ client, directory }) => {
       .trim()
   }
 
-  async function speak(text: string): Promise<void> {
+  async function speak(text: string, sessionId: string): Promise<void> {
     const cleaned = cleanTextForSpeech(text)
     if (!cleaned) return
 
@@ -1216,6 +1268,15 @@ export const TTSPlugin: Plugin = async ({ client, directory }) => {
     try {
       const config = await loadConfig()
       const engine = await getEngine()
+      
+      // Save TTS data to .tts/ directory
+      await saveTTSData(sessionId, {
+        originalText: text,
+        cleanedText: cleaned,
+        spokenText: toSpeak,
+        engine,
+        timestamp: new Date().toISOString()
+      })
       
       if (engine === "coqui") {
         const available = await isCoquiAvailable(config)
@@ -1280,7 +1341,7 @@ export const TTSPlugin: Plugin = async ({ client, directory }) => {
           const finalResponse = extractFinalResponse(messages)
           if (finalResponse) {
             spokenSessions.add(sessionId)
-            await speak(finalResponse)
+            await speak(finalResponse, sessionId)
           }
         } catch {
           // Silently fail

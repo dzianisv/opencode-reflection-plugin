@@ -170,10 +170,9 @@ describe("TTS Plugin - Engine Configuration", () => {
     assert.ok(pluginContent.includes("ensureChatterboxScript"), "Missing script generation function")
   })
 
-  it("defaults to OS TTS with Samantha voice", () => {
-    // Default is now OS TTS (Samantha voice on macOS) for out-of-box female voice experience
-    assert.ok(pluginContent.includes('engine: "os"'), "OS TTS should be default")
-    assert.ok(pluginContent.includes('voice: "Samantha"'), "Samantha should be default voice")
+  it("defaults to Coqui TTS engine", () => {
+    // Default is now Coqui TTS for high-quality neural voice
+    assert.ok(pluginContent.includes('engine: "coqui"'), "Coqui TTS should be default engine")
   })
 })
 
@@ -239,9 +238,9 @@ describe("TTS Plugin - Chatterbox Features", () => {
 
   it("prevents multiple server instances with locking", () => {
     assert.ok(pluginContent.includes("server.lock"), "Missing lock file")
-    assert.ok(pluginContent.includes("acquireLock"), "Missing lock acquisition")
-    assert.ok(pluginContent.includes("releaseLock"), "Missing lock release")
-    assert.ok(pluginContent.includes("isServerRunning"), "Missing server check function")
+    assert.ok(pluginContent.includes("acquireChatterboxLock"), "Missing lock acquisition")
+    assert.ok(pluginContent.includes("releaseChatterboxLock"), "Missing lock release")
+    assert.ok(pluginContent.includes("isChatterboxServerRunning"), "Missing server check function")
   })
 
   it("runs server detached for sharing across sessions", () => {

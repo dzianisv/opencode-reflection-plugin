@@ -9,7 +9,7 @@
 
 import { describe, it, before, after } from "node:test"
 import assert from "node:assert"
-import { mkdir, rm, writeFile, readFile, access, unlink } from "fs/promises"
+import { mkdir, rm, writeFile, readFile, access, unlink, readdir } from "fs/promises"
 import { join, dirname } from "path"
 import { fileURLToPath } from "url"
 import { exec, spawn } from "child_process"
@@ -326,5 +326,188 @@ describe("TTS E2E - Script Extraction Validation", () => {
     )
     
     console.log("Embedded script has MPS support")
+  })
+})
+
+describe("TTS Plugin - Integration Requirements", () => {
+  it("defaults to Coqui engine in code", async () => {
+    const pluginSource = await readFile(join(__dirname, "../tts.ts"), "utf-8")
+    
+    // Check loadConfig default returns coqui
+    assert.ok(
+      pluginSource.includes('engine: "coqui"'),
+      "Default engine should be coqui"
+    )
+    
+    // Verify getEngine returns coqui by default
+    assert.ok(
+      pluginSource.includes('return config.engine || "coqui"'),
+      "getEngine should default to coqui"
+    )
+    
+    console.log("TTS plugin defaults to Coqui engine")
+  })
+
+  it("stores TTS output in .tts/ directory", async () => {
+    const pluginSource = await readFile(join(__dirname, "../tts.ts"), "utf-8")
+    
+    // Check for .tts/ directory usage
+    assert.ok(
+      pluginSource.includes('const ttsDir = join(directory, ".tts")'),
+      "Plugin should define ttsDir in .tts/"
+    )
+    
+    // Check for saveTTSData function
+    assert.ok(
+      pluginSource.includes("async function saveTTSData"),
+      "Plugin should have saveTTSData function"
+    )
+    
+    // Check that saveTTSData writes to ttsDir
+    assert.ok(
+      pluginSource.includes("join(ttsDir, filename)"),
+      "saveTTSData should write to ttsDir"
+    )
+    
+    // Check saveTTSData is called with session data
+    assert.ok(
+      pluginSource.includes("await saveTTSData(sessionId"),
+      "saveTTSData should be called with sessionId"
+    )
+    
+    console.log("TTS plugin stores output in .tts/ directory")
+  })
+
+  it("saves all required fields in TTS data", async () => {
+    const pluginSource = await readFile(join(__dirname, "../tts.ts"), "utf-8")
+    
+    // Check saveTTSData includes required fields
+    assert.ok(
+      pluginSource.includes("originalText:"),
+      "TTS data should include originalText"
+    )
+    assert.ok(
+      pluginSource.includes("cleanedText:"),
+      "TTS data should include cleanedText"
+    )
+    assert.ok(
+      pluginSource.includes("spokenText:"),
+      "TTS data should include spokenText"
+    )
+    assert.ok(
+      pluginSource.includes("engine:") || pluginSource.includes("engine,"),
+      "TTS data should include engine"
+    )
+    assert.ok(
+      pluginSource.includes("timestamp:"),
+      "TTS data should include timestamp"
+    )
+    
+    console.log("TTS data includes all required fields")
+  })
+
+  it("TTS is triggered on session completion", async () => {
+    const pluginSource = await readFile(join(__dirname, "../tts.ts"), "utf-8")
+    
+    // Check for session.idle event handling
+    assert.ok(
+      pluginSource.includes('event.type === "session.idle"'),
+      "Plugin should handle session.idle event"
+    )
+    
+    // Check for isSessionComplete check
+    assert.ok(
+      pluginSource.includes("isSessionComplete(messages)"),
+      "Plugin should check if session is complete"
+    )
+    
+    // Check speak is called with finalResponse
+    assert.ok(
+      pluginSource.includes("await speak(finalResponse, sessionId)"),
+      "speak should be called with finalResponse and sessionId"
+    )
+    
+    console.log("TTS is triggered on session completion")
+  })
+})
+
+describe("TTS Plugin - Coqui Engine Integration", { skip: !RUN_E2E }, () => {
+  const COQUI_DIR = join(process.env.HOME || "", ".config/opencode/coqui")
+  const COQUI_VENV = join(COQUI_DIR, "venv")
+  const COQUI_SCRIPT = join(COQUI_DIR, "tts.py")
+  const COQUI_PYTHON = join(COQUI_VENV, "bin/python")
+
+  it("Coqui TTS is installed and ready", async () => {
+    try {
+      await access(COQUI_PYTHON)
+    } catch {
+      console.log("Coqui venv not found at", COQUI_VENV)
+      assert.fail("Coqui TTS venv must be installed for integration test")
+    }
+
+    try {
+      const { stdout } = await execAsync(`"${COQUI_PYTHON}" -c "from TTS.api import TTS; print('ok')"`, { timeout: 30000 })
+      assert.ok(stdout.includes("ok"), "Coqui TTS should be importable")
+      console.log("Coqui TTS is installed and ready")
+    } catch (e: any) {
+      assert.fail(`Coqui TTS import failed: ${e.message}`)
+    }
+  })
+
+  it("Coqui generates audio with MPS device", { timeout: TIMEOUT }, async () => {
+    // Check MPS availability
+    let mpsAvailable = false
+    try {
+      const { stdout } = await execAsync(
+        `"${COQUI_PYTHON}" -c "import torch; print('yes' if torch.backends.mps.is_available() else 'no')"`,
+        { timeout: 10000 }
+      )
+      mpsAvailable = stdout.trim() === "yes"
+    } catch {}
+
+    if (!mpsAvailable) {
+      console.log("MPS not available, skipping MPS test")
+      return
+    }
+
+    console.log("Testing Coqui TTS with MPS device...")
+    const outputFile = join(tmpdir(), `coqui_test_${Date.now()}.wav`)
+    
+    const start = Date.now()
+    const result = await new Promise<{ success: boolean; error?: string }>((resolve) => {
+      const proc = spawn(COQUI_PYTHON, [
+        COQUI_SCRIPT,
+        "--output", outputFile,
+        "--device", "mps",
+        "--model", "xtts_v2",
+        "Hello, this is a test."
+      ])
+      
+      let stderr = ""
+      proc.stderr?.on("data", (d) => { stderr += d.toString() })
+      
+      const timeout = setTimeout(() => {
+        proc.kill()
+        resolve({ success: false, error: "Timeout" })
+      }, TIMEOUT)
+      
+      proc.on("close", (code) => {
+        clearTimeout(timeout)
+        resolve({
+          success: code === 0,
+          error: code !== 0 ? `Exit ${code}: ${stderr}` : undefined
+        })
+      })
+    })
+
+    const duration = Date.now() - start
+    console.log(`Duration: ${Math.round(duration / 1000)}s`)
+
+    if (result.success) {
+      // Cleanup
+      try { await unlink(outputFile) } catch {}
+    }
+
+    assert.ok(result.success, `Coqui with MPS should work. Error: ${result.error}`)
   })
 })
