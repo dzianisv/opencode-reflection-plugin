@@ -15,6 +15,7 @@ const POLL_INTERVAL = 2_000
 
 export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
   const attempts = new Map<string, number>()
+  const lastHumanMsgCount = new Map<string, number>() // Track human message count to detect new input
   const processedSessions = new Set<string>()
   const activeReflections = new Set<string>()
 
@@ -56,6 +57,22 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
     const lastAssistant = [...messages].reverse().find((m: any) => m.info?.role === "assistant")
     if (!lastAssistant?.info?.error) return false
     return lastAssistant.info.error.name === "MessageAbortedError"
+  }
+
+  function countHumanMessages(messages: any[]): number {
+    let count = 0
+    for (const msg of messages) {
+      if (msg.info?.role === "user") {
+        // Don't count reflection feedback as human input
+        for (const part of msg.parts || []) {
+          if (part.type === "text" && part.text && !part.text.includes("## Reflection:")) {
+            count++
+            break
+          }
+        }
+      }
+    }
+    return count
   }
 
   function extractTaskAndResult(messages: any[]): { task: string; result: string; tools: string } | null {
@@ -112,14 +129,26 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
   }
 
   async function runReflection(sessionId: string): Promise<void> {
-    // Prevent concurrent/duplicate reflections
-    if (processedSessions.has(sessionId) || activeReflections.has(sessionId)) return
+    // Prevent concurrent reflections
+    if (activeReflections.has(sessionId)) return
     activeReflections.add(sessionId)
 
     try {
-      // Get messages
+      // Get messages first - needed for human message count check
       const { data: messages } = await client.session.messages({ path: { id: sessionId } })
       if (!messages || messages.length < 2) return
+
+      // Check if human typed a new message - reset attempts if so
+      const humanMsgCount = countHumanMessages(messages)
+      const prevHumanMsgCount = lastHumanMsgCount.get(sessionId) || 0
+      if (humanMsgCount > prevHumanMsgCount) {
+        attempts.delete(sessionId)
+        processedSessions.delete(sessionId) // Allow reflection again after new human input
+      }
+      lastHumanMsgCount.set(sessionId, humanMsgCount)
+
+      // Now check if already processed (after potential reset above)
+      if (processedSessions.has(sessionId)) return
 
       // Skip judge sessions
       if (isJudgeSession(messages)) {
