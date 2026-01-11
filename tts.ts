@@ -42,6 +42,10 @@ const TTS_CONFIG_PATH = join(homedir(), ".config", "opencode", "tts.json")
 // Global speech lock - prevents multiple agents from speaking simultaneously
 const SPEECH_LOCK_PATH = join(homedir(), ".config", "opencode", "speech.lock")
 const SPEECH_LOCK_TIMEOUT = 120000  // Max speech duration (2 minutes)
+const SPEECH_QUEUE_DIR = join(homedir(), ".config", "opencode", "speech-queue")
+
+// Unique identifier for this process instance
+const PROCESS_ID = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
 
 // TTS Engine types
 type TTSEngine = "coqui" | "chatterbox" | "os"
@@ -148,10 +152,104 @@ async function getEngine(): Promise<TTSEngine> {
   return config.engine || "coqui"
 }
 
-// ==================== SPEECH LOCK ====================
+// ==================== SPEECH LOCK (Cross-Process Queue) ====================
 
-async function acquireSpeechLock(): Promise<boolean> {
-  const lockContent = `${process.pid}\n${Date.now()}`
+/**
+ * Speech queue implementation using file-based locking.
+ * Ensures multiple OpenCode sessions speak one at a time in FIFO order.
+ * 
+ * How it works:
+ * 1. Each speech request creates a ticket file in SPEECH_QUEUE_DIR with timestamp
+ * 2. Process waits until its ticket is the oldest (first in queue)
+ * 3. Process acquires the lock, speaks, then releases lock and removes ticket
+ * 4. Stale tickets (older than SPEECH_LOCK_TIMEOUT) are auto-cleaned
+ */
+
+interface SpeechTicket {
+  processId: string
+  timestamp: number
+  sessionId: string
+}
+
+async function ensureQueueDir(): Promise<void> {
+  try {
+    await mkdir(SPEECH_QUEUE_DIR, { recursive: true })
+  } catch {}
+}
+
+async function createSpeechTicket(sessionId: string): Promise<string> {
+  await ensureQueueDir()
+  const timestamp = Date.now()
+  const ticketId = `${timestamp}-${PROCESS_ID}-${sessionId}`
+  const ticketPath = join(SPEECH_QUEUE_DIR, `${ticketId}.ticket`)
+  const ticket: SpeechTicket = {
+    processId: PROCESS_ID,
+    timestamp,
+    sessionId
+  }
+  await writeFile(ticketPath, JSON.stringify(ticket))
+  return ticketId
+}
+
+async function removeSpeechTicket(ticketId: string): Promise<void> {
+  const ticketPath = join(SPEECH_QUEUE_DIR, `${ticketId}.ticket`)
+  await unlink(ticketPath).catch(() => {})
+}
+
+async function getQueuedTickets(): Promise<{ id: string; ticket: SpeechTicket }[]> {
+  await ensureQueueDir()
+  const { readdir } = await import("fs/promises")
+  try {
+    const files = await readdir(SPEECH_QUEUE_DIR)
+    const tickets: { id: string; ticket: SpeechTicket }[] = []
+    
+    for (const file of files) {
+      if (!file.endsWith(".ticket")) continue
+      const ticketId = file.replace(".ticket", "")
+      const ticketPath = join(SPEECH_QUEUE_DIR, file)
+      try {
+        const content = await readFile(ticketPath, "utf-8")
+        const ticket = JSON.parse(content) as SpeechTicket
+        
+        // Clean up stale tickets (older than timeout)
+        if (Date.now() - ticket.timestamp > SPEECH_LOCK_TIMEOUT) {
+          await unlink(ticketPath).catch(() => {})
+          continue
+        }
+        
+        tickets.push({ id: ticketId, ticket })
+      } catch {
+        // Invalid ticket, remove it
+        await unlink(ticketPath).catch(() => {})
+      }
+    }
+    
+    // Sort by timestamp (FIFO)
+    tickets.sort((a, b) => a.ticket.timestamp - b.ticket.timestamp)
+    return tickets
+  } catch {
+    return []
+  }
+}
+
+async function isMyTurn(ticketId: string): Promise<boolean> {
+  const tickets = await getQueuedTickets()
+  if (tickets.length === 0) return false
+  return tickets[0].id === ticketId
+}
+
+async function acquireSpeechLock(ticketId: string): Promise<boolean> {
+  // Only acquire lock if it's our turn in the queue
+  if (!(await isMyTurn(ticketId))) {
+    return false
+  }
+  
+  const lockContent = JSON.stringify({
+    processId: PROCESS_ID,
+    ticketId,
+    timestamp: Date.now()
+  })
+  
   try {
     const { open } = await import("fs/promises")
     const handle = await open(SPEECH_LOCK_PATH, "wx")
@@ -160,35 +258,55 @@ async function acquireSpeechLock(): Promise<boolean> {
     return true
   } catch (e: any) {
     if (e.code === "EEXIST") {
+      // Lock exists - check if it's stale
       try {
         const content = await readFile(SPEECH_LOCK_PATH, "utf-8")
-        const timestamp = parseInt(content.split("\n")[1] || "0", 10)
-        if (Date.now() - timestamp > SPEECH_LOCK_TIMEOUT) {
+        const lock = JSON.parse(content)
+        if (Date.now() - lock.timestamp > SPEECH_LOCK_TIMEOUT) {
+          // Stale lock, remove it and try again
           await unlink(SPEECH_LOCK_PATH).catch(() => {})
-          return acquireSpeechLock()
+          return acquireSpeechLock(ticketId)
         }
-        return false
       } catch {
+        // Corrupted lock file, remove and retry
         await unlink(SPEECH_LOCK_PATH).catch(() => {})
-        return acquireSpeechLock()
+        return acquireSpeechLock(ticketId)
       }
     }
     return false
   }
 }
 
-async function releaseSpeechLock(): Promise<void> {
-  await unlink(SPEECH_LOCK_PATH).catch(() => {})
+async function releaseSpeechLock(ticketId: string): Promise<void> {
+  // Only release if we own the lock
+  try {
+    const content = await readFile(SPEECH_LOCK_PATH, "utf-8")
+    const lock = JSON.parse(content)
+    if (lock.processId === PROCESS_ID && lock.ticketId === ticketId) {
+      await unlink(SPEECH_LOCK_PATH).catch(() => {})
+    }
+  } catch {
+    // Lock doesn't exist or is corrupted, nothing to release
+  }
 }
 
-async function waitForSpeechLock(timeoutMs: number = 60000): Promise<boolean> {
+async function waitForSpeechTurn(ticketId: string, timeoutMs: number = 180000): Promise<boolean> {
   const startTime = Date.now()
+  
   while (Date.now() - startTime < timeoutMs) {
-    if (await acquireSpeechLock()) {
-      return true
+    // First wait for our turn in the queue
+    if (await isMyTurn(ticketId)) {
+      // Then try to acquire the lock
+      if (await acquireSpeechLock(ticketId)) {
+        return true
+      }
     }
+    // Wait before retrying
     await new Promise(r => setTimeout(r, 500))
   }
+  
+  // Timeout - remove our ticket and give up
+  await removeSpeechTicket(ticketId)
   return false
 }
 
@@ -1265,9 +1383,11 @@ export const TTSPlugin: Plugin = async ({ client, directory }) => {
       ? cleaned.slice(0, MAX_SPEECH_LENGTH) + "... message truncated."
       : cleaned
 
-    // Acquire speech lock - wait up to 60s for other agents to finish speaking
-    const lockAcquired = await waitForSpeechLock(60000)
-    if (!lockAcquired) {
+    // Create a ticket and wait for our turn in the speech queue
+    const ticketId = await createSpeechTicket(sessionId)
+    const gotTurn = await waitForSpeechTurn(ticketId, 180000) // 3 min timeout
+    if (!gotTurn) {
+      await debugLog(`Failed to acquire speech turn for ${sessionId}`)
       return
     }
 
@@ -1288,7 +1408,9 @@ export const TTSPlugin: Plugin = async ({ client, directory }) => {
         const available = await isCoquiAvailable(config)
         if (available) {
           const success = await speakWithCoqui(toSpeak, config)
-          if (success) return
+          if (success) {
+            return
+          }
         }
       }
       
@@ -1296,14 +1418,17 @@ export const TTSPlugin: Plugin = async ({ client, directory }) => {
         const available = await isChatterboxAvailable(config)
         if (available) {
           const success = await speakWithChatterbox(toSpeak, config)
-          if (success) return
+          if (success) {
+            return
+          }
         }
       }
       
       // OS TTS (fallback or explicit choice)
       await speakWithOS(toSpeak, config)
     } finally {
-      await releaseSpeechLock()
+      await releaseSpeechLock(ticketId)
+      await removeSpeechTicket(ticketId)
     }
   }
 
