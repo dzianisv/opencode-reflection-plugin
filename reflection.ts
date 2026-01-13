@@ -17,11 +17,13 @@ const POLL_INTERVAL = 2_000
 
 export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
   
+  // Track attempts per (sessionId, humanMsgCount) - resets automatically for new messages
   const attempts = new Map<string, number>()
-  const lastHumanMsgCount = new Map<string, number>() // Track human message count to detect new input
-  const processedSessions = new Set<string>()
+  // Track which human message count we last completed reflection on
+  const lastReflectedMsgCount = new Map<string, number>()
   const activeReflections = new Set<string>()
   const abortedSessions = new Set<string>() // Permanently track aborted sessions - never reflect on these
+  const judgeSessionIds = new Set<string>() // Track judge session IDs to skip them
 
   // Directory for storing reflection input/output
   const reflectionDir = join(directory, ".reflection")
@@ -37,7 +39,13 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
     result: string
     tools: string
     prompt: string
-    verdict: { complete: boolean; feedback: string } | null
+    verdict: { 
+      complete: boolean
+      severity: string
+      feedback: string
+      missing?: string[]
+      next_actions?: string[]
+    } | null
     timestamp: string
   }): Promise<void> {
     await ensureReflectionDir()
@@ -69,7 +77,11 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
     return ""
   }
 
-  function isJudgeSession(messages: any[]): boolean {
+  function isJudgeSession(sessionId: string, messages: any[]): boolean {
+    // Fast path: known judge session
+    if (judgeSessionIds.has(sessionId)) return true
+    
+    // Content-based detection
     for (const msg of messages) {
       for (const part of msg.parts || []) {
         if (part.type === "text" && part.text?.includes("TASK VERIFICATION")) {
@@ -177,8 +189,13 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
     return null
   }
 
+  // Generate a key for tracking attempts per task (session + human message count)
+  function getAttemptKey(sessionId: string, humanMsgCount: number): string {
+    return `${sessionId}:${humanMsgCount}`
+  }
+
   async function runReflection(sessionId: string): Promise<void> {
-    // Prevent concurrent reflections
+    // Prevent concurrent reflections on same session
     if (activeReflections.has(sessionId)) {
       return
     }
@@ -190,34 +207,33 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
       if (!messages || messages.length < 2) return
 
       // Skip if session was aborted/cancelled by user (Esc key) - check FIRST
-      // This takes priority over everything else
       if (wasSessionAborted(sessionId, messages)) {
-        processedSessions.add(sessionId)
         return
       }
 
       // Skip judge sessions
-      if (isJudgeSession(messages)) {
-        processedSessions.add(sessionId)
+      if (isJudgeSession(sessionId, messages)) {
         return
       }
 
-      // Check if human typed a new message - reset attempts if so
+      // Count human messages to determine current "task"
       const humanMsgCount = countHumanMessages(messages)
-      const prevHumanMsgCount = lastHumanMsgCount.get(sessionId) || 0
-      if (humanMsgCount > prevHumanMsgCount) {
-        attempts.delete(sessionId)
-        processedSessions.delete(sessionId) // Allow reflection again after new human input
+      if (humanMsgCount === 0) return
+
+      // Check if we already completed reflection for this exact message count
+      const lastReflected = lastReflectedMsgCount.get(sessionId) || 0
+      if (humanMsgCount <= lastReflected) {
+        // Already handled this task
+        return
       }
-      lastHumanMsgCount.set(sessionId, humanMsgCount)
 
-      // Now check if already processed (after potential reset above)
-      if (processedSessions.has(sessionId)) return
-
-      // Check attempt count
-      const attemptCount = attempts.get(sessionId) || 0
+      // Get attempt count for THIS specific task (session + message count)
+      const attemptKey = getAttemptKey(sessionId, humanMsgCount)
+      const attemptCount = attempts.get(attemptKey) || 0
+      
       if (attemptCount >= MAX_ATTEMPTS) {
-        processedSessions.add(sessionId)
+        // Max attempts for this task - mark as reflected and stop
+        lastReflectedMsgCount.set(sessionId, humanMsgCount)
         await showToast(`Max attempts (${MAX_ATTEMPTS}) reached`, "warning")
         return
       }
@@ -232,8 +248,8 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
       })
       if (!judgeSession?.id) return
 
-      // Mark judge session as processed immediately
-      processedSessions.add(judgeSession.id)
+      // Track judge session ID to skip it if session.idle fires on it
+      judgeSessionIds.add(judgeSession.id)
 
       // Helper to clean up judge session (always called)
       const cleanupJudgeSession = async () => {
@@ -245,14 +261,18 @@ export const ReflectionPlugin: Plugin = async ({ client, directory }) => {
         } catch (e) {
           // Log deletion failures for debugging (but don't break the flow)
           console.error(`[Reflection] Failed to delete judge session ${judgeSession.id}:`, e)
+        } finally {
+          judgeSessionIds.delete(judgeSession.id)
         }
       }
 
       try {
         const agents = await getAgentsFile()
-        const prompt = `TASK VERIFICATION
+        const prompt = `TASK VERIFICATION - Release Manager Protocol
 
-${agents ? `## Instructions\n${agents.slice(0, 1500)}\n` : ""}
+You are a release manager with risk ownership. Evaluate whether the task is complete and ready for release.
+
+${agents ? `## Project Instructions\n${agents.slice(0, 1500)}\n` : ""}
 ## Original Task
 ${extracted.task}
 
@@ -263,8 +283,60 @@ ${extracted.tools || "(none)"}
 ${extracted.result.slice(0, 2000)}
 
 ---
-Reply with JSON only:
-{"complete": true/false, "feedback": "brief explanation"}`
+
+## Evaluation Rules
+
+### Severity Levels
+- BLOCKER: security, auth, billing/subscription, data loss, E2E broken, prod health broken → complete MUST be false
+- HIGH: major functionality degraded, CI red without approved waiver
+- MEDIUM: partial degradation or uncertain coverage
+- LOW: cosmetic / non-impacting
+- NONE: no issues
+
+### Hard Requirements (must ALL be met for complete:true)
+1. All explicitly requested functionality implemented
+2. Tests run and pass (if tests were requested or exist)
+3. Build/compile succeeds (if applicable)
+4. No unhandled errors in output
+
+### Evidence Requirements
+Every claim needs evidence. Reject claims like "ready", "verified", "working", "fixed" without:
+- Actual command output showing success
+- Test name + result
+- File changes made
+
+### Flaky Test Protocol
+If a test is called "flaky" or "unrelated", require at least ONE of:
+- Rerun with pass (show output)
+- Quarantine/skip with tracking ticket
+- Replacement test validating same requirement
+- Stabilization fix applied
+Without mitigation → severity >= HIGH, complete: false
+
+### Waiver Protocol
+If a required gate failed but agent claims ready, response MUST include:
+- Explicit waiver statement ("shipping with known issue X")
+- Impact scope ("affects Y users/flows")
+- Mitigation/rollback plan
+- Follow-up tracking (ticket/issue reference)
+Without waiver details → complete: false
+
+### Temporal Consistency
+Reject if:
+- Readiness claimed before verification ran
+- Later output contradicts earlier "done" claim
+- Failures downgraded after-the-fact without new evidence
+
+---
+
+Reply with JSON only (no other text):
+{
+  "complete": true/false,
+  "severity": "NONE|LOW|MEDIUM|HIGH|BLOCKER",
+  "feedback": "brief explanation of verdict",
+  "missing": ["list of missing required steps or evidence"],
+  "next_actions": ["concrete commands or checks to run"]
+}`
 
         await client.session.promptAsync({
           path: { id: judgeSession.id },
@@ -274,13 +346,14 @@ Reply with JSON only:
         const response = await waitForResponse(judgeSession.id)
         
         if (!response) {
-          processedSessions.add(sessionId)
+          // Timeout - mark this task as reflected to avoid infinite retries
+          lastReflectedMsgCount.set(sessionId, humanMsgCount)
           return
         }
 
         const jsonMatch = response.match(/\{[\s\S]*\}/)
         if (!jsonMatch) {
-          processedSessions.add(sessionId)
+          lastReflectedMsgCount.set(sessionId, humanMsgCount)
           return
         }
 
@@ -296,36 +369,52 @@ Reply with JSON only:
           timestamp: new Date().toISOString()
         })
 
-        if (verdict.complete) {
-          // COMPLETE: mark as done, show toast only (no prompt!)
-          processedSessions.add(sessionId)
-          attempts.delete(sessionId)
-          await showToast("Task complete ✓", "success")
+        // Normalize severity and enforce BLOCKER rule
+        const severity = verdict.severity || "MEDIUM"
+        const isBlocker = severity === "BLOCKER"
+        const isComplete = verdict.complete && !isBlocker
+
+        if (isComplete) {
+          // COMPLETE: mark this task as reflected, show toast only (no prompt!)
+          lastReflectedMsgCount.set(sessionId, humanMsgCount)
+          attempts.delete(attemptKey)
+          const toastMsg = severity === "NONE" ? "Task complete ✓" : `Task complete ✓ (${severity})`
+          await showToast(toastMsg, "success")
         } else {
-          // INCOMPLETE: send feedback to continue
-          attempts.set(sessionId, attemptCount + 1)
-          await showToast(`Incomplete (${attemptCount + 1}/${MAX_ATTEMPTS})`, "warning")
+          // INCOMPLETE: increment attempts and send feedback
+          attempts.set(attemptKey, attemptCount + 1)
+          const toastVariant = isBlocker ? "error" : "warning"
+          await showToast(`${severity}: Incomplete (${attemptCount + 1}/${MAX_ATTEMPTS})`, toastVariant)
+          
+          // Build structured feedback message
+          const missing = verdict.missing?.length 
+            ? `\n### Missing\n${verdict.missing.map((m: string) => `- ${m}`).join("\n")}`
+            : ""
+          const nextActions = verdict.next_actions?.length
+            ? `\n### Next Actions\n${verdict.next_actions.map((a: string) => `- ${a}`).join("\n")}`
+            : ""
           
           await client.session.promptAsync({
             path: { id: sessionId },
             body: {
               parts: [{
                 type: "text",
-                text: `## Reflection: Task Incomplete (${attemptCount + 1}/${MAX_ATTEMPTS})
+                text: `## Reflection: Task Incomplete (${attemptCount + 1}/${MAX_ATTEMPTS}) [${severity}]
 
-${verdict.feedback || "Please review and complete the task."}
+${verdict.feedback || "Please review and complete the task."}${missing}${nextActions}
 
 Please address the above and continue.`
               }]
             }
           })
+          // Don't mark as reflected yet - we want to check again after agent responds
         }
       } finally {
         // Always clean up judge session to prevent clutter in /session list
         await cleanupJudgeSession()
       }
     } catch {
-      processedSessions.add(sessionId)
+      // On error, don't mark as reflected - allow retry
     } finally {
       activeReflections.delete(sessionId)
     }
@@ -340,15 +429,15 @@ Please address the above and continue.`
         const error = props?.error
         if (sessionId && error?.name === "MessageAbortedError") {
           abortedSessions.add(sessionId)
-          processedSessions.add(sessionId)
         }
       }
       
       if (event.type === "session.idle") {
         const sessionId = (event as any).properties?.sessionID
         if (sessionId && typeof sessionId === "string") {
-          // Fast path: skip if already known to be aborted
+          // Fast path: skip if already known to be aborted or a judge session
           if (abortedSessions.has(sessionId)) return
+          if (judgeSessionIds.has(sessionId)) return
           await runReflection(sessionId)
         }
       }
