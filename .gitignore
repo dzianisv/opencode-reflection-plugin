@@ -34,6 +34,7 @@ evals/evals/
 evals/datasets/cc-stop-candidates-raw.jsonl
 evals/datasets/cc-stop-candidates-filtered.jsonl
 evals/datasets/cc-stop-classified.jsonl
+evals/datasets/cc-stop-classified-v2.jsonl
 # Allow committing the redacted gold set only
 !evals/datasets/cc-stop-labeled-gold-redacted.jsonl
 
@@ -41,6 +42,7 @@ evals/datasets/cc-stop-classified.jsonl
 evals/datasets/oc-stop-candidates-raw.jsonl
 evals/datasets/oc-stop-candidates-filtered.jsonl
 evals/datasets/oc-stop-classified.jsonl
+evals/datasets/oc-stop-classified-v2.jsonl
 !evals/datasets/oc-stop-labeled-gold-redacted.jsonl
 
 # E2E eval reports
