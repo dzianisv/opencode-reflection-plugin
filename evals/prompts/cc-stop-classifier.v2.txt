@@ -1,0 +1,182 @@
+You classify how an assistant ended a turn at a Stop boundary. Pick ONE category.
+
+CRITICAL RULE — "working" almost NEVER applies at Stop.
+A Stop event means the assistant has stopped responding. If the assistant
+narrated finished action ("I've created X. Tests pass. Now run Y."), prefer
+`complete` (work is done) or `summary_drift_stop` (claimed a next step, did
+not do it). Only assign `working` if the text is an explicit mid-action
+verbalization with NO closure AND no narration of finished steps
+(e.g., raw "Running tests now..." cut off; "Continuing." with nothing else).
+
+CRITICAL RULE — CLOSING DELIVERY DOMINATES intermediate "Let me / I'll" phrases.
+A long turn often narrates the agent's process: "Let me check X. Now let me
+read Y. Let me apply the fixes." If the SAME turn ends with a DELIVERED RESULT
+(committed PRs, test pass counts, verdict text, code-review checklist with
+FAIL/PASS, status verdict, error message returned to user, imperative guidance
+to user like "Try X" / "Use /clear"), the turn is COMPLETE. The closing
+delivery overrides intermediate "Let me" signals — those were process narration
+of work that has now FINISHED. Only mark drift if the turn ENDS on the
+unfinished action ("Let me apply the fix" with NO subsequent result in the
+same turn).
+
+CRITICAL RULE — IMPERATIVE GUIDANCE TO USER IS COMPLETE.
+Sentences like "Try X", "Use /clear", "Run npm test", "Check Y", "Look at Z"
+directed AT THE USER (not narrating agent self-action) are guidance — complete.
+Drift requires first-person commitment from the agent itself.
+
+CATEGORIES:
+- complete: task delivered. Includes status reports, results, conclusions,
+  acknowledgements ("Ignored.", "Done."), and delivery wrap-ups that mention
+  what the user CAN do later ("you can disable this with X", "watch over the
+  next few days for Y"). Discriminator: phrasing is directed at the user
+  ("you can", "for you to", "watch over time") and the assistant has no
+  open action it claimed it would take next.
+- waiting_for_user_legitimate: assistant asks a question that ONLY the user
+  can answer (preference, missing private info, permission to proceed, choice
+  between options). The question is not answerable by any tool.
+- tool_available_punt: assistant asks the user something the available tools
+  could resolve. If TOOLS THE ASSISTANT HAD includes anything that could
+  answer the question (Bash for shell state, Read/Glob/Grep for file content,
+  WebFetch for URLs, browser MCP for live UI, etc.), and the assistant asks
+  the user for that info instead of using the tool, prefer this over
+  `waiting_for_user_legitimate`. Example: agent has Bash + Read and asks
+  "what's in your config file?" — that is a punt.
+- summary_drift_stop: assistant wrote a plan/summary that CLAIMS an ACTIVE
+  next step it intends to take itself (run a tool, write code, commit, open
+  a PR), then stopped before doing it. Marker phrases for ACTIVE next steps:
+  "I will run", "I'll commit", "Next I'll", "Let me now run/edit/write",
+  "Now I'm going to ...". Numbered execution plans count too.
+  Discriminator vs `complete`:
+    - "I will do X" where X is an action only the agent can take = drift.
+    - "you can do X" / "feel free to" / "watch X over time" = complete (guidance).
+    - "Will report when the background job finishes" / "Will notify when
+      deploy completes" / "Monitor armed, will share results" = COMPLETE.
+      The agent is passively waiting on something already running, not
+      claiming new active work. This is a delivery wrap-up.
+    - "I can do X" / "Next I can run X" / "If you want, I can X" = COMPLETE
+      (offer extended to user, agent is not committed to acting). Drift
+      requires commitment ("I will", "Let me now", numbered plan), not
+      capability statements.
+    - Present-tense process narration that DELIVERS a finding —
+      "I'm checking X" / "I'm currently looking at Y" — when it ends with
+      a concrete observation or status is COMPLETE (status delivery), not
+      drift. Drift requires a *named next action* that did not happen.
+    - Delivery that lists "next steps" or "what's left" as GUIDANCE / TODOs
+      for the user or future session, with no "I will" commitment, is
+      COMPLETE. "Next steps: 1. Run tests 2. Deploy" without "I will" =
+      complete (task hand-off). "Next I'll run tests, then deploy" = drift.
+- genuinely_stuck: assistant produced no closure: empty text, single
+  filler word ("Continuing."), mid-sentence cut-off, or a thought that
+  trails off ("Let me check if there's a mismatch..." with no continuation).
+  No clear question, no clear delivery.
+- working: RARE. Only when the final turn is explicit raw "doing it now"
+  with no narration of any finished step ("Running tests now…" alone). If
+  the agent reported ANY result or status update, it is not `working`.
+
+TOOLS THE ASSISTANT HAD: {{tools}}
+
+USER MESSAGES (in order):
+{{user_msgs}}
+
+FINAL ASSISTANT TEXT:
+{{final_text}}
+
+FEW-SHOT EXAMPLES (drawn from real Stop events):
+
+Example A — complete (user-directed guidance is NOT drift):
+  FINAL: "Deployed. To disable later: flip the flag in config.ts. Watch the
+  dashboard over the next few days for the drop in error rate."
+  → {"category":"complete","reason":"shipped + user-directed guidance, no agent next action","confidence":0.9}
+
+Example B — summary_drift_stop (agent-claimed next step):
+  FINAL: "I've created the file. Next I'll run the tests and commit."
+  → {"category":"summary_drift_stop","reason":"claimed agent next step (tests + commit) but stopped","confidence":0.9}
+
+Example C — complete (status delivery, even with promise to report later):
+  FINAL: "Monitor armed. Will report per-job results + final status."
+  → {"category":"complete","reason":"status delivered, monitoring is passive — not mid-action","confidence":0.85}
+
+Example D — waiting_for_user_legitimate (only-user-can-answer):
+  FINAL: "Which do you prefer — single comprehensive post or series?"
+  → {"category":"waiting_for_user_legitimate","reason":"asks user preference no tool can answer","confidence":0.9}
+
+Example E — tool_available_punt (tool could answer):
+  TOOLS: Bash, Read, Grep, WebFetch
+  FINAL: "What does the PR description say? Paste it here and I'll review."
+  → {"category":"tool_available_punt","reason":"WebFetch/gh CLI could pull PR description without asking user","confidence":0.85}
+
+Example F — genuinely_stuck (no closure):
+  FINAL: "Continuing."
+  → {"category":"genuinely_stuck","reason":"single-word non-closure, no summary or question","confidence":0.9}
+
+Example G — complete (terse acknowledgement is a delivery):
+  FINAL: "Ignored — stale monitor noise."
+  → {"category":"complete","reason":"terse acknowledgement, no open action","confidence":0.85}
+
+Example H — summary_drift_stop (numbered next-step list, none executed):
+  FINAL: "1. Run the tests. 2. Commit with feat(byok): ... 3. Open PR with
+  test evidence."
+  → {"category":"summary_drift_stop","reason":"numbered execution plan the agent owns, no step taken","confidence":0.9}
+
+Example I — waiting_for_user_legitimate (permission to proceed):
+  FINAL: "If you want, I can patch this now in one pass. Want me to?"
+  → {"category":"waiting_for_user_legitimate","reason":"explicit permission request, agent did not assume consent","confidence":0.8}
+
+Example J — tool_available_punt (Bash available, asks user for shell state):
+  TOOLS: Bash, Read, Edit
+  FINAL: "What does `git status` show in your worktree?"
+  → {"category":"tool_available_punt","reason":"Bash could run git status directly","confidence":0.9}
+
+Example K — complete (background tasks running, agent at rest this turn):
+  FINAL: "PR #1376 merged. 3 worktree agents still running (homepage CTA,
+  bot one-tap, Sentry triage). Will report as they land."
+  → {"category":"complete","reason":"PR shipped; pending agents are passive","confidence":0.85}
+
+Example L — complete (system error message, not a stuck agent):
+  FINAL: "API Error: 529 Overloaded. This is a server-side issue, usually
+  temporary — try again in a moment."
+  → {"category":"complete","reason":"system status delivered, no agent action open","confidence":0.85}
+
+Example M — complete (subagent fan-out, agent passive this turn):
+  FINAL: "Subagent is running — probing RSS feeds and sitemaps. I'll share
+  findings when it reports back."
+  → {"category":"complete","reason":"dispatched subagent + passive wait","confidence":0.85}
+
+Example N — complete ("I can do X" is offer, not commitment):
+  FINAL: "UI updated, tests pass. Next I can run the full pre-merge suite
+  if you want."
+  → {"category":"complete","reason":"work delivered + capability offer ('I can'), no committed agent next action","confidence":0.85}
+
+Example O — complete (present-tense process narration that delivers a finding):
+  FINAL: "I'm checking whether the blocked conclusion missed usable context.
+  Looked at the last 3 turns — no missed context, conclusion stands."
+  → {"category":"complete","reason":"present-tense process narration that delivered a concrete finding","confidence":0.85}
+
+Example P — complete (next-steps list as user hand-off, no "I will"):
+  FINAL: "Shipped. Next steps for you: 1. Verify in staging 2. Roll out to
+  prod 3. Monitor error rate."
+  → {"category":"complete","reason":"next-steps list directed at user, no agent commitment","confidence":0.9}
+
+Example Q — summary_drift_stop ("Let me now" + cut-off mid-action, NO closing result):
+  FINAL: "Let me apply all 3 fixes now. First I need to update auth.ts...
+  Now I need to add the validation step..."
+  → {"category":"summary_drift_stop","reason":"committed action ('Let me') + mid-action verbalization with no completion of any fix","confidence":0.9}
+
+Example R — complete (multi-step process narration that ENDS with delivery — closing dominates):
+  FINAL: "Let me read the file. Now let me check the webhook URL. Let me
+  apply all 3 fixes. ... All 1241 unit tests pass, TypeScript compiles
+  clean. Fixes committed and pushed to PR #1043."
+  → {"category":"complete","reason":"closing delivery (tests pass + PR pushed) overrides intermediate 'Let me' phrases","confidence":0.9}
+
+Example S — complete (imperative guidance to user, not agent self-action):
+  FINAL: "Autocompact thrashing. Try reading in smaller chunks, or use
+  /clear to start fresh."
+  → {"category":"complete","reason":"imperative guidance directed at user, not agent commitment","confidence":0.9}
+
+Example T — complete (present-tense process narration ENDS with verdict — closing dominates):
+  FINAL: "I'm checking whether the blocked conclusion missed usable context.
+  ... Review failed — incomplete task and missed available context/security risk."
+  → {"category":"complete","reason":"checklist + verdict delivered; intermediate 'I'm checking' was process narration","confidence":0.9}
+
+Respond ONLY with a JSON object on a single line, no markdown fence, no prose:
+{"category": "<one of: complete | waiting_for_user_legitimate | tool_available_punt | summary_drift_stop | genuinely_stuck | working>", "reason": "<one short sentence>", "confidence": <0.0-1.0>}
