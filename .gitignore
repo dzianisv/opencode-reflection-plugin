@@ -37,6 +37,12 @@ evals/datasets/cc-stop-classified.jsonl
 # Allow committing the redacted gold set only
 !evals/datasets/cc-stop-labeled-gold-redacted.jsonl
 
+# Raw OC stop datasets (same privacy treatment as CC)
+evals/datasets/oc-stop-candidates-raw.jsonl
+evals/datasets/oc-stop-candidates-filtered.jsonl
+evals/datasets/oc-stop-classified.jsonl
+!evals/datasets/oc-stop-labeled-gold-redacted.jsonl
+
 # E2E eval reports
 .eval/
 .eval-tmp/
