@@ -1,0 +1,29 @@
+{
+  "name": "opencode-reflection",
+  "version": "3.0.0",
+  "type": "module",
+  "description": "OpenCode plugin — reflection/judge layer that verifies task completion and forces the agent to continue until the work is actually done",
+  "main": "index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "reflection-3.ts"
+  ],
+  "scripts": {
+    "prepack": "rm -f ./reflection-3.ts && cp ../../reflection-3.ts ./reflection-3.ts",
+    "postpack": "rm -f ./reflection-3.ts && ln -sf ../../reflection-3.ts ./reflection-3.ts"
+  },
+  "keywords": ["opencode", "plugin", "reflection", "judge", "task-verification", "ai", "agent"],
+  "author": "dzianisv",
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.1.48",
+    "@opencode-ai/sdk": "latest",
+    "typescript": "^5.0.0"
+  }
+}

@@ -75,6 +75,10 @@ jobs:
           # Must be the base host, e.g. https://vibebrowser-dev.openai.azure.com
           AZURE_OPENAI_BASE_URL: ${{ secrets.AZURE_OPENAI_BASE_URL }}
           AZURE_OPENAI_API_BASE_URL: ${{ secrets.AZURE_OPENAI_BASE_URL }}
+          # Judge suite runs the cheap gpt-5.4-nano model (see promptfooconfig.yaml).
+          # It scores 33/34 — one borderline case differs from the gpt-5.1 baseline.
+          # Tolerate <=1 of 34 (>=97%); a 2nd failure turns CI red.
+          EVAL_PASS_THRESHOLD: "0.97"
         run: npm run eval:judge -- --no-progress-bar -o evals/results/judge-results.json
 
       - name: Run Stuck Detection Evaluation

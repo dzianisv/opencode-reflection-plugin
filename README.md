@@ -1,34 +1,55 @@
 # OpenCode Plugins
-<img width="1428" height="926" alt="Screenshot 2026-02-08 at 09 13 26" src="https://github.com/user-attachments/assets/1f507538-be9e-43a4-a1da-cb328e8e1878" />
 
-## @reflection-3.ts - push opencode agent to reflect on the task, useful for continuous interrupted runs
-<img width="1472" height="972" alt="image" src="https://github.com/user-attachments/assets/40f3a752-4b84-4151-93f4-2614330ac653" />
+> ⚠️ **Archived — superseded by [dzianisv/agents-supervisor](https://github.com/dzianisv/agents-supervisor).**
+> The reflection/supervisor plugin was extracted into its own repo (rebranded
+> "supervisor"): dual-runtime (Claude Code + OpenCode), one shared core, plus
+> `/supervisor:train` (learn from your sessions) and a goal loop. Use that repo.
+> This repo is kept read-only for history; branch-cleanup recovery notes live in
+> [`docs/branch-cleanup-2026-06.md`](docs/branch-cleanup-2026-06.md).
 
-## @claude/ - Claude Code reflection plugin (experimental)
-Port of the reflection idea to Claude Code as a `Stop` hook. Classifies the last assistant turn into one of six categories (complete, working, waiting_for_user_legitimate, tool_available_punt, summary_drift_stop, genuinely_stuck) with Claude Haiku 4.5, and re-prompts the agent when it punted to the user, drifted into "summary + next step + stop", or halted mid-thought. Honors `stop_hook_active` loop guard and caps at 3 inject cycles per session. Install with `claude --plugin-dir ./claude` for dev or via the marketplace once published. See [`claude/README.md`](claude/README.md). Baseline classifier accuracy and dataset are tracked in [`evals/datasets/README.md`](evals/datasets/README.md) and follow-up [#138](https://github.com/dzianisv/opencode-plugins/issues/138).
-
-## @telegram.ts - integrates with Telegram over [t.me/OpencodeMgrBot](@OpenCodeMgrBot) bot
-<img width="1019" height="734" alt="image" src="https://github.com/user-attachments/assets/6f120c14-dba5-431b-a458-0f51f360f561" />
-@tts.ts - uses coqui TTS to read the opencode agent response. Useful to run a few agents on macOS and be notified when one finishes a task. 
-
+**78% of AI coding agent stops are premature.** This is a judge layer that catches them.
 
 [![Tests](https://github.com/dzianisv/opencode-plugins/actions/workflows/test.yml/badge.svg)](https://github.com/dzianisv/opencode-plugins/actions/workflows/test.yml)
+[![npm](https://img.shields.io/npm/v/opencode-reflection.svg)](https://www.npmjs.com/package/opencode-reflection)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![OpenCode](https://img.shields.io/badge/OpenCode-v1.0+-blue.svg)](https://github.com/sst/opencode)
 
-**Make your AI coding assistant actually finish the job.** Self-reflection and task verification for [OpenCode](https://github.com/sst/opencode) - the open-source AI coding agent.
+We measured it: 143 real OpenCode + Claude Code sessions, 227 stops classified. **177/227 (78%) were premature** — 91 stopped to ask "Want me to run the tests?" when they had Bash, 68 listed "Next: create PR" and stopped without doing it.
 
-## The Problem
+`Reflection-3` fires after every agent turn, classifies the stop as complete or premature, and re-prompts with targeted feedback if the agent quit early. It enforces workflow gates: tests must run and pass, PR must be created, CI must be green.
 
-AI coding assistants often:
-- Stop before the task is truly complete
-- Miss edge cases or skip steps
-- Say "done" when tests are failing
-- Require constant human supervision
+**Works on OpenCode and Claude Code.**
 
-## The Solution
+```json
+// opencode.json — add one line
+{ "plugin": ["opencode-reflection"] }
+```
 
-This plugin adds a **judge layer** that automatically evaluates task completion and forces the agent to continue until the work is actually done. Plus, get notified on Telegram when long-running tasks finish - and reply back via text or voice.
+```
+# Claude Code
+/plugin marketplace add dzianisv/opencode-plugins
+/plugin install reflection-cc
+```
+
+<img width="1428" height="926" alt="Reflection plugin in action" src="https://github.com/user-attachments/assets/1f507538-be9e-43a4-a1da-cb328e8e1878" />
+
+---
+
+| Plugin | What it does |
+|--------|-------------|
+| **reflection-3.ts** | Judge layer — re-prompts agent when it stops prematurely |
+| **tts.ts** | TTS + Telegram notifications with two-way voice communication |
+| **worktree-status.ts** | Git worktree status tool |
+
+## The problem in detail
+
+Your coding agent says "Want me to run the tests?" — it has Bash. It writes "Next step: create PR" and stops. It claims "done" without running CI. These aren't rare edge cases. We measured 78%.
+
+The reflection plugin catches this by running a judge after every idle event. The judge's rubric is mined from real sessions, not hand-written heuristics:
+- **PERMISSION-SEEKING**: final turn is a yes/no question about something the agent can do itself → premature
+- **STOPPED-WITH-TODOS**: response lists "remaining tasks" and stops → premature
+- **FALSE-COMPLETE**: claims done but no test commands ran → premature
+
+Implements [Reflexion](https://lilianweng.github.io/posts/2023-06-23-agent/) (Shinn et al. 2023): actor = coding agent, evaluator = LLM judge, verbal feedback injected back into context, max 3 retries. See [`docs/reflection.blog.md`](docs/reflection.blog.md) for the full technical writeup.
 
 | Plugin | Description |
 |--------|-------------|
@@ -44,15 +65,102 @@ This plugin adds a **judge layer** that automatically evaluates task completion 
 - **Local TTS** - Hear responses read aloud (Coqui VCTK/VITS, Chatterbox, macOS)
 - **Voice-to-text** - Reply to Telegram with voice messages, transcribed by local Whisper
 
-## Quick Install
+## OpenCode Install
+
+Add `"opencode-reflection"` to the `plugin` array in `opencode.json`.
+
+**Global** (`~/.config/opencode/opencode.json` — applies to every project):
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-reflection"]
+}
+```
+
+**Per-project** (create `opencode.json` at repo root):
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-reflection"]
+}
+```
+
+**From a local clone** (dev / pin-to-commit):
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["/absolute/path/to/opencode-plugins/packages/reflection"]
+}
+```
+
+OpenCode resolves the entry point from `package.json` `exports`, imports the default export (a `Plugin` function), and calls it at startup. No manual `bun install` needed — OpenCode handles deps.
+
+Restart OpenCode after editing `opencode.json` to activate.
+
+---
+
+## Claude Code Install
+
+### Via `/plugin` marketplace (recommended)
+
+Inside a Claude Code session:
+
+```
+/plugin marketplace add dzianisv/opencode-plugins
+/plugin install reflection-cc
+```
+
+Or from the CLI directly:
+
+```bash
+claude plugin marketplace add dzianisv/opencode-plugins
+claude plugin install reflection-cc
+```
+
+This registers the marketplace from `dzianisv/opencode-plugins` (`.claude-plugin/marketplace.json`) and installs the `reflection-cc` Stop hook into your Claude Code settings. No npm deps required — `reflect.mjs` is self-contained.
+
+### Manual install (always works)
+
+Add the Stop hook to `~/.claude/settings.json` (global) or `.claude/settings.json` (project-level):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /absolute/path/to/opencode-plugins/claude/bin/reflect.mjs",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+> **Note:** the event name is `"Stop"` (capital S) — lowercase `"stop"` is silently ignored.
+
+**Verify it's running:**
+```bash
+echo '{"session_id":"test","transcript_path":"/dev/null","stop_hook_active":false}' \
+  | node /path/to/opencode-plugins/claude/bin/reflect.mjs
+# → exits 0 (no transcript = approve by default)
+```
+
+---
+
+## Quick Install (copy-script method — OpenCode only)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dzianisv/opencode-plugins/main/install.sh | bash
 ```
 
-This downloads all plugins to `~/.config/opencode/plugin/`, installs dependencies, and you're ready to go. Restart OpenCode to activate.
+Downloads all plugins to `~/.config/opencode/plugin/`, installs dependencies, ready to go. Restart OpenCode after.
 
-**Prerequisites:** [bun](https://bun.sh) (install with `curl -fsSL https://bun.sh/install | bash`)
+**Prerequisites:** [bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`)
 
 ## Agent Skills
 
@@ -141,6 +249,40 @@ Evaluates task completion after each agent response and provides feedback if wor
 3. **Judge Session**: Creates separate hidden session via OpenCode Sessions API for unbiased evaluation
 4. **Verdict**: PASS → toast notification | FAIL → feedback injected into chat
 5. **Continuation**: Agent receives feedback and continues working
+
+### Relation to Reflexion (Weng 2023 / Shinn et al. 2023)
+
+This plugin is, in the taxonomy of Lilian Weng's [*LLM Powered Autonomous Agents*](https://lilianweng.github.io/posts/2023-06-23-agent/),
+a **Reflexion**-style self-improvement loop — not ReAct, Chain-of-Hindsight, or
+Algorithm Distillation. The mapping is almost one-to-one:
+
+| Reflexion concept (Weng / Shinn et al.) | This plugin |
+| --- | --- |
+| **Actor** — the policy LLM that acts | The coding agent (OpenCode / Claude Code) itself |
+| **Evaluator** — scores the trajectory | The LLM-as-judge self-assessment (`buildSelfAssessmentPrompt` / `classifyStop`), run in an unbiased hidden session |
+| **Self-reflection** — verbal feedback added to memory for the next attempt | The feedback string injected back into the chat / the Stop-hook `block` reason — natural-language, not a scalar reward |
+| **Heuristic: "inefficient" trajectory (too long without success)** | `PLANNING_LOOP` detector — many tool calls with a near-zero write ratio (`PLANNING_LOOP_MIN_TOOL_CALLS`, `PLANNING_LOOP_WRITE_RATIO_THRESHOLD`) |
+| **Heuristic: "hallucination" = consecutive identical actions → same observation** | `ACTION_LOOP` detector — repeated identical commands above `ACTION_LOOP_REPETITION_THRESHOLD` |
+| **"Up to three reflections stored in working memory"** | `MAX_ATTEMPTS = 3` — at most three feedback injections per task before giving up |
+| **Reset the environment to start a new trial** | Re-prompt the *same* session to continue (no env reset — agentic coding has no episodic reset) |
+
+**Where it differs from textbook Reflexion:**
+
+- **Trigger granularity.** Classic Reflexion evaluates at the end of an episode
+  / on a failed trajectory. This plugin fires on the `session.idle` (OpenCode) or
+  `Stop` (Claude Code) boundary — i.e. *every time the agent thinks it's done* —
+  so its primary job is catching **premature stops**, not just failed runs.
+- **Evaluator design.** Reflexion's evaluator is a task-specific heuristic (and
+  sometimes an LLM). Here the evaluator is primarily an **LLM-as-judge** whose
+  rubric is **mined from 227 real agent stops** (78% were premature), layered on
+  top of the two Reflexion-style heuristics above.
+- **Verbal, not numeric.** Like Reflexion (and unlike RLHF/CoH), the feedback is
+  natural language fed straight back into context — no fine-tuning, no reward
+  model, no gradient updates.
+
+In short: **Reflexion = actor + evaluator + verbal self-reflection with a small
+bounded memory of retries**, and that is exactly the shape of this plugin, with
+the evaluator specialized toward detecting premature task abandonment.
 
 ### State Graph
 

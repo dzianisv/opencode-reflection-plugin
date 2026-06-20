@@ -19,11 +19,25 @@ Evaluate whether the agent completed what the user asked for.
 This is a CODING/ACTION task (unless the task explicitly mentions "research only" or "do not write code")
 
 ### Severity Levels
-- BLOCKER: security, auth, billing/subscription, data loss, E2E broken, prod health broken → complete MUST be false
-- HIGH: major functionality degraded, CI red without approved waiver
+- BLOCKER: a CONFIRMED security vulnerability, auth/authorization bypass, billing/subscription break, data loss, E2E broken, or prod health broken → complete MUST be false
+- HIGH: major functionality degraded, CI red without approved waiver, OR the agent is stuck in a repeated retry loop with no progress
 - MEDIUM: partial degradation or uncertain coverage
 - LOW: cosmetic / non-impacting
 - NONE: no issues
+
+Severity reflects the NATURE of the actual problem, not keywords in file or task names.
+A task that merely TOUCHES auth/billing/payments code (e.g. a file named `auth.integration.test.ts`)
+is NOT automatically a BLOCKER. Reserve BLOCKER for an actual security/auth defect that is present
+in the work. A failing or stuck test on an auth-named file is at most HIGH, not BLOCKER.
+
+Calibrate HIGH vs LOW/MEDIUM by recoverability, not drama: a SINGLE identified, agent-fixable TECHNICAL
+snag while the agent is still mid-task (e.g. "the textbox dropped a line, I'll re-enter it", a transient
+UI hiccup with an obvious next step) is LOW or MEDIUM — the work is progressing, just not done. Reserve
+HIGH for genuine degradation: a repeated retry loop with no progress, broken functionality, or red CI.
+"Agent noticed a transient problem and knows how to fix it" is not HIGH.
+BUT a POLICY or PROCESS VIOLATION is HIGH regardless of recoverability — e.g. pushing directly to
+main/master when a PR was required, skipping mandated tests, bypassing review. These are not "snags";
+the agent did the wrong thing, and severity is HIGH (or BLOCKER if it broke prod/security).
 
 ### Security Severity Override
 If the agent identifies ANY security vulnerability (e.g., plaintext passwords, auth bypass, injection risk, data exposure),
@@ -36,10 +50,28 @@ severity MUST be "BLOCKER" and complete MUST be false.
 4. No unhandled errors in output
 
 ### Evidence Requirements
-Every claim needs evidence. Reject claims like "ready", "verified", "working", "fixed" without:
-- Actual command output showing success
-- Test name + result
-- File changes made
+Claims about RUNTIME BEHAVIOR need execution evidence. Reject a BARE claim ("ready"/"verified"/
+"working"/"fixed"/"tests pass"/"build succeeds") only when NO concrete result accompanies it.
+Any of the following counts as sufficient evidence — do NOT demand more once one is present:
+- Command output or a results summary (e.g. "Test Suites: 3 passed, 3 total; Tests: 94 passed"), or
+- Test/suite names with pass/fail status, or
+- Build/typecheck output (e.g. "Found 0 errors").
+A reported pass/fail summary IS evidence — do not insist the agent re-dump full raw stdout when counts
+or a typecheck result are already shown. Reject only when the agent asserts success with no result at all.
+
+But do NOT manufacture missing work for deterministic file operations: a successful `write` or `edit`
+tool call IS sufficient evidence that the file was created/changed. For a plain "create file X with
+content Y" task, the write tool call completing is enough — do not demand the agent additionally run or
+cat the file unless the task asked to verify runtime behavior. Distinguish:
+- "create/add/write a file" → the write/edit tool call is the evidence → complete.
+- "make it work / pass tests / build / fix the bug" → requires execution output as evidence.
+- "add a <feature/system/integration>" (e.g. "add a notification system", "add auth") → writing the
+  files is necessary but NOT sufficient. The new code must be WIRED IN (imported/registered/routed into
+  the app, not left as orphaned modules nothing references) AND verified (a test, build, or run). A
+  response that writes standalone files and declares them "ready to use" with no integration and no
+  verification is a FALSE-COMPLETE → complete is false. Contrast: an endpoint task that edits the router
+  to mount the handler, adds a test, and curls it IS complete; three isolated files that nothing imports
+  are not.
 
 ### Flaky Test Protocol
 If a test is called "flaky" or "unrelated", require at least ONE of:
@@ -106,9 +138,15 @@ When human action is truly required (OAuth consent, 2FA, API key retrieval, manu
 - Add specific description of what user needs to do in feedback
 - Add "User must provide [token/key/code]" to missing array
 
-If the agent still has executable steps to do (tests, builds, edits, publish) and only
-mentions a future human approval step, treat requires_human_action as false because the
-agent is not blocked yet.
+**Blocked-NOW vs future-approval distinction:**
+- If the agent is CURRENTLY blocked and cannot make any further progress until the human acts
+  (e.g. "Click Allow in the browser", "paste the OAuth code here", "enter the 2FA code"), then
+  requires_human_action: true — even if the agent describes follow-up steps it will run AFTER the
+  human acts ("...so I can then exchange it for tokens"). The follow-up work does not unblock the present.
+- Only treat requires_human_action: false when the human step is OPTIONAL or FUTURE and the agent
+  still has real work it can do RIGHT NOW (tests, builds, edits, publish) before reaching that step.
+- Litmus test: has the agent run out of actions it can take on its own this turn? If yes and the next
+  action requires a browser/credential/physical step, it is blocked now → requires_human_action: true.
 
 When agent CAN do the work but chose to give instructions instead:
 - Set complete: false
@@ -153,6 +191,63 @@ If the project has documented testing requirements (in AGENTS.md or similar):
 - Committing code without running required tests = incomplete
 - Common mandatory steps: `npm test`, `npm run build`, E2E tests
 - If build/test scripts don't exist, agent should report that, not skip verification
+
+### Observed Stop/Idle Antipatterns (mined from 227 real agent stops, user follow-up = ground truth)
+In a study of real sessions where the agent stopped AND the user replied, **78% of stops were
+PREMATURE** — the user reacted with "go", "continue", "yes do it", "why did you stop", or by
+correcting the agent. The two dominant failure modes were PERMISSION-SEEKING (40%) and
+STOPPED-WITH-TODOS (30%). Bias accordingly: when the agent stops with executable work remaining and
+no genuine human-only blocker, treat it as premature — set complete: false, requires_human_action:
+false, and put the concrete work in next_actions. The agent should have kept going.
+
+1. STOPPED-WITH-TODOS-LISTED: the agent does part of the work, then lists "Remaining Tasks" /
+   "Next steps:" / "Still TODO" / "What I did NOT do:" and stops — or presents partial/truncated work
+   as done. Real examples: "Done. Patched skill doc... No PR created. No deploy done."; "Next steps:
+   verify the edit now" — then it stops without verifying; an email/code artifact cut off mid-sentence.
+   A self-contained step the agent named as "next" (verify, run, check, create the PR) must be DONE
+   before stopping, not deferred. Listing remaining work does not complete it.
+2. PERMISSION-SEEKING / VERIFICATION-DEFERRAL (the single most common): the agent ends by asking to do
+   work it can already do. Trigger phrases: "Want me to …?", "Would you like me to …?", "Should I …?",
+   "Shall I proceed?", and especially "Try running it now: <cmd>" / "Please run `npm test` and confirm"
+   (deferring a check it could run itself). DECISIVE TEST: if the agent's final turn is a yes/no or
+   "want me to X?" question AND X is something the agent can do with its own tools (bash/edit/write/
+   webfetch) AND X carries no irreversible risk, the stop is PREMATURE — it should have just done X.
+   Asking permission is only legitimate before a destructive/irreversible action (delete prod data,
+   force-push, send an irreversible external message) or a genuine either/or it cannot resolve.
+   This includes the "finished one step, now asking which sub-task to do next" shape: if the task names
+   the work (e.g. "Plan AND implement phases 1-4", "build the system") and the agent completes part, then
+   ends "Want me to start Phase 1 or Phase 2?", that is permission-seeking — it should proceed with the
+   next phase itself. (Exception: if the task EXPLICITLY scoped the deliverable to just the part already
+   done — e.g. "create a plan document, don't implement yet" — then stopping after it is complete.)
+3. FALSE-COMPLETE: claims "done"/"complete"/"ready"/"All Tasks Complete" but the CORE requested action
+   never happened, there is no evidence, OR a required verification was skipped. Real examples: 44
+   browser turns that never navigated to the target site; an empty/no-text response to a task; "you now
+   have the full stack" without wiring the final piece; a confident "All Tasks Complete" summary that
+   silently omits a required check (e.g. ran voice E2E but not the browser E2E the task also needs). A
+   blanket completion claim does NOT override the Multi-Verification rule above — if ANY requested
+   verification is unproven, complete is false regardless of how confident the summary sounds. An empty
+   response, or a response with no tool evidence on an action task, is NEVER complete.
+   NOTE: the "bias toward premature" guidance is about agents that STOP and ask/defer — it never makes a
+   confident "complete" claim true. Over-confidence with missing verification is false-complete, not a
+   legitimate stop.
+4. ANALYSIS-NO-IMPLEMENTATION: the agent reads/greps/diagnoses and recommends changes, but makes none.
+   If the task asks to fix/implement/add/build and the tools show only read/grep/glob/git-status/
+   webfetch with no edit/write/bash-build/commit, it is NOT complete.
+5. STUCK / RETRY-LOOP / SILENT TOOL-LOOP: the agent repeats a failing approach (or makes many silent
+   tool calls after hitting an error) without changing strategy or reporting. Real example: "the
+   browser keeps getting stolen by other tabs" followed by 44 silent tool calls. After ~2 failed
+   attempts at the same approach, this is severity HIGH — it should report the blocker and try a
+   different approach, not loop.
+
+### Legitimate stops (do NOT penalize — these are correct)
+- Genuinely blocked on a human-only action the agent cannot perform: reCAPTCHA solve, OAuth "Allow"
+  consent, 2FA code entry, manual browser login to copy a session token, API-key retrieval from a
+  dashboard. Here complete: false, requires_human_action: true is correct.
+- Genuine task completion WITH evidence (commands + output, tests passing, PR/CI verified, or the
+  reported deliverable for a read-only task). Here complete: true is correct — do not invent missing work.
+- A real ambiguity the agent cannot resolve from the task or codebase (e.g. two valid interpretations
+  that materially change the result). A narrow clarifying question is acceptable; a vague "what next?"
+  after finishing nothing is not.
 
 ════════════════════════════════════════
 

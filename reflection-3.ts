@@ -1135,7 +1135,14 @@ Rules:
 - If you need user action (auth, 2FA, credentials, access requests, uploads, approvals), list it in needs_user_action.
 - PLANNING LOOP CHECK: If the task requires code changes (fix, implement, add, create, build, refactor, update) but the "Tool Commands Run" section shows ONLY read operations (read, glob, grep, git log, git status, git diff, webfetch, task/explore) and NO write operations (edit, write, bash with build/test/commit, github_create_pull_request, etc.), then the task is NOT complete. Set status to "in_progress", set stuck to true, and list "Implement the actual code changes" in remaining_work. Analyzing and recommending changes is not the same as making them.
 - If you are repeating the same actions (deploy, test, build) without making progress, set "stuck": true.
-- Do not retry the same failing approach more than twice — try something different or report stuck.`
+- Do not retry the same failing approach more than twice — try something different or report stuck.
+
+PREMATURE-STOP ANTIPATTERNS (mined from 227 real agent stops where the user replied; 78% were premature — the user said "go"/"continue"/"yes do it" or corrected the agent). If the agent's last response matches one of these AND executable work remains, the task is NOT complete — set status "in_progress", and put the concrete next action in remaining_work and next_steps:
+- PERMISSION-SEEKING (most common, ~40%): the response ends by asking to do work it can already do — "Want me to…?", "Would you like me to…?", "Should I…?", "Shall I proceed?", or "Try running it now"/"Please run X and confirm" (deferring a check it could run itself). DECISIVE TEST: if the final turn is a yes/no or "want me to X?" question AND X is something the agent can do with its own tools AND X carries no irreversible risk, the stop is premature — it should have just done X. Asking is only legitimate before a destructive/irreversible action (delete prod data, force-push, send an irreversible external message).
+- STOPPED-WITH-TODOS (~30%): the response lists "Remaining Tasks"/"Next steps"/"Still TODO"/"What I did NOT do" or names a verify/run/check/create-PR step as "next" — then stops without doing it. Listing remaining work does not complete it; a self-contained named step must be DONE before stopping. Set status "in_progress" with that work in remaining_work.
+- FALSE-COMPLETE: claims "done"/"complete"/"ready"/"all tasks complete" but the CORE requested action never happened, a required check was skipped, or there is no evidence. An empty/no-text response, or a response with no write/tool evidence on an action task, is NEVER complete. For an "add a <feature/system>" task, writing files is necessary but NOT sufficient — the new code must be WIRED IN (imported/registered/routed, not orphaned modules) AND verified (test/build/run); "ready to use" with no integration is incomplete (status "in_progress").
+- LEGITIMATE STOP (do NOT flag): genuine human-only block (OAuth consent, 2FA code, credential/API-key retrieval, captcha) → status "waiting_for_user" with the item in needs_user_action. Genuine completion WITH evidence (commands+output, tests passing, PR/CI verified) → status "complete"; do not invent missing work.
+- SEVERITY/STUCK: a single recoverable technical snag mid-task (knows the fix) is not "stuck". But a policy/process violation — pushing to main when a PR was required, skipping mandated tests — is a real failure: status "in_progress" with the corrective action in remaining_work, never "complete".`
 }
 
 function parseSelfAssessmentJson(text: string | null | undefined): SelfAssessment | null {
@@ -1390,6 +1397,12 @@ Rules:
 - If user action is required (auth/2FA/credentials), set requires_human_action true.
 - If agent is stuck, require alternate approach and continued work.
 - PLANNING LOOP: If the task requires code changes (fix, implement, add, create, build, refactor) but the Tool Signals show ONLY read operations (read, glob, grep, git log/status/diff, webfetch) and NO write operations (edit, write, bash with build/test/commit, PR creation), set complete to false and add "Implement actual code changes" to missing. Analysis alone does not fulfill an implementation task.
+- PREMATURE-STOP ANTIPATTERNS (78% of real agent stops were premature). Set complete false, requires_human_action false, and put the concrete work in next_actions when the agent's response matches:
+  - PERMISSION-SEEKING: ends asking to do work it can already do ("Want me to…?", "Should I…?", "Try running it now", "Please run X and confirm"). DECISIVE TEST: final-turn yes/no question about something the agent can do with its own tools and no irreversible risk = premature; it should have done it. Includes "finished step N, asking which sub-task to do next" when the task named the work. Asking is legitimate only before destructive/irreversible actions, or when the task explicitly scoped the deliverable to just the part already done.
+  - STOPPED-WITH-TODOS: lists "Remaining Tasks"/"Next steps"/"What I did NOT do" or names a verify/run/check step as next, then stops. Listing ≠ doing.
+  - FALSE-COMPLETE: claims done/ready/"all tasks complete" but the core action never happened, a required check was skipped, or no evidence. Empty/no-tool response on an action task is never complete. For an "add a <feature/system>" task, written files alone are not enough — code must be wired in (imported/registered/routed) AND verified; "ready to use" with no integration is incomplete.
+- LEGITIMATE STOP (do NOT penalize): genuine human-only block (OAuth consent, 2FA, credential/API-key retrieval, captcha) → complete false, requires_human_action true. Genuine completion WITH evidence → complete true; do not invent missing work.
+- SEVERITY: a single recoverable technical snag mid-task is LOW/MEDIUM; a repeated retry loop, broken functionality, or red CI is HIGH; a policy/process violation (push to main when a PR was required, skipping mandated tests) is HIGH; a confirmed security/auth/data-loss/prod defect is BLOCKER.
 
 Return JSON only:
 {
@@ -1552,6 +1565,31 @@ export const Reflection3Plugin: Plugin = async ({ client, directory }) => {
   const recentlyAbortedSessions = new Map<string, number>()
   const attempts = new Map<string, number>()
   let toolReflectionPrompt: string | null = null
+  let currentSessionId: string | null = null  // tracks most recent active session for the toggle tool
+
+  const disabledFlagPath = join(directory, '.reflection', 'disabled')
+
+  async function isSessionDisabled(sessionId: string): Promise<boolean> {
+    try {
+      const content = await readFile(disabledFlagPath, 'utf8')
+      return content.split('\n').map(l => l.trim()).filter(Boolean).includes(sessionId)
+    } catch { return false }
+  }
+
+  async function setSessionDisabled(sessionId: string, disabled: boolean): Promise<void> {
+    let lines: string[] = []
+    try {
+      const content = await readFile(disabledFlagPath, 'utf8')
+      lines = content.split('\n').map(l => l.trim()).filter(Boolean)
+    } catch {}
+    if (disabled) {
+      if (!lines.includes(sessionId)) lines.push(sessionId)
+    } else {
+      lines = lines.filter(l => l !== sessionId)
+    }
+    await mkdir(join(directory, '.reflection'), { recursive: true })
+    await writeFile(disabledFlagPath, lines.join('\n') + (lines.length ? '\n' : ''))
+  }
 
   const setReflectionDescription = "Use this for difficult or complex tasks to set reflection guidance with a plan/checklist. Provide concrete steps and verification checks so reflection can validate completion quality and catch missed work."
   const executeSetReflection = async (args: { guidance?: string; clear?: boolean }) => {
@@ -1572,7 +1610,19 @@ export const Reflection3Plugin: Plugin = async ({ client, directory }) => {
     return msg
   }
 
+  // reflection on/off toggle tool (session-scoped: only affects the current session's ID)
+  const reflectionToggleDescription = "Enable or disable the reflection judge for the current session. 'off' adds this session's ID to .reflection/disabled so the judge skips it; 'on' removes it. Other sessions and other running instances are unaffected."
+  const executeReflectionToggle = async (args: { action: "on" | "off" }) => {
+    const sid = currentSessionId
+    if (!sid) return "No active session tracked yet — wait for the first session.idle event, then try again."
+    await setSessionDisabled(sid, args.action === "off")
+    return args.action === "off"
+      ? `Reflection disabled for session ${sid.slice(0, 8)}… (added to .reflection/disabled).`
+      : `Reflection enabled for session ${sid.slice(0, 8)}… (removed from .reflection/disabled).`
+  }
+
   let setReflectionTool: any = null
+  let reflectionToggleTool: any = null
   try {
     const { tool } = await import("@opencode-ai/plugin/tool")
     setReflectionTool = tool({
@@ -1582,6 +1632,13 @@ export const Reflection3Plugin: Plugin = async ({ client, directory }) => {
         clear: tool.schema.boolean().optional().describe("Set true to clear the current tool-provided reflection guidance.")
       },
       execute: executeSetReflection
+    })
+    reflectionToggleTool = tool({
+      description: reflectionToggleDescription,
+      args: {
+        action: tool.schema.string().describe("'on' to enable reflection, 'off' to disable it for this project.")
+      },
+      execute: executeReflectionToggle as any
     })
   } catch {
     try {
@@ -1594,14 +1651,29 @@ export const Reflection3Plugin: Plugin = async ({ client, directory }) => {
         },
         execute: executeSetReflection
       }
+      reflectionToggleTool = {
+        description: reflectionToggleDescription,
+        args: {
+          action: z.enum(["on", "off"]).describe("'on' to enable reflection, 'off' to disable it for this project.")
+        },
+        execute: executeReflectionToggle
+      }
     } catch {
       setReflectionTool = null
+      reflectionToggleTool = null
     }
   }
 
   async function runReflection(sessionId: string): Promise<void> {
       debug("runReflection called for session:", sessionId.slice(0, 8))
       if (activeReflections.has(sessionId)) return
+
+      currentSessionId = sessionId
+      if (await isSessionDisabled(sessionId)) {
+        debug("Reflection disabled for session:", sessionId.slice(0, 8))
+        return
+      }
+
       activeReflections.add(sessionId)
 
       try {
@@ -1911,7 +1983,10 @@ export const Reflection3Plugin: Plugin = async ({ client, directory }) => {
     config: async (_config) => {
       return
     },
-    tool: setReflectionTool ? { set_reflection: setReflectionTool } : undefined,
+    tool: (setReflectionTool || reflectionToggleTool) ? {
+      ...(setReflectionTool ? { set_reflection: setReflectionTool } : {}),
+      ...(reflectionToggleTool ? { reflection: reflectionToggleTool } : {}),
+    } : undefined,
     event: async ({ event }: { event: { type: string; properties?: any } }) => {
       debug("event received:", event.type)
       if (event.type === "session.error") {

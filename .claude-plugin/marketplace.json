@@ -1,0 +1,19 @@
+{
+  "name": "opencode-plugins",
+  "owner": {
+    "name": "dzianisv",
+    "url": "https://github.com/dzianisv"
+  },
+  "plugins": [
+    {
+      "name": "reflection-cc",
+      "source": "./claude",
+      "description": "Re-prompts Claude Code when it stops prematurely — catches PERMISSION-SEEKING, STOPPED-WITH-TODOS, and FALSE-COMPLETE failure modes (78% of real agent stops are premature), and injects targeted recovery instructions via the Stop hook.",
+      "version": "0.1.0",
+      "author": {
+        "name": "dzianisv",
+        "url": "https://github.com/dzianisv"
+      }
+    }
+  ]
+}

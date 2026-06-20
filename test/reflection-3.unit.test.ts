@@ -59,6 +59,32 @@ describe("reflection-3 unit", () => {
     assert.ok(prompt.includes("Provide a PR URL"))
   })
 
+  it("self-assessment prompt includes premature-stop antipatterns", () => {
+    const prompt = buildSelfAssessmentPrompt({
+      taskSummary: "Implement feature",
+      taskType: "coding",
+      agentMode: "build",
+      humanMessages: ["Implement feature"],
+      toolsSummary: "(none)",
+      detectedSignals: [],
+      recentCommands: [],
+      pushedToDefaultBranch: false,
+      requiresTests: false,
+      requiresBuild: false,
+      requiresPR: false,
+      requiresCI: false,
+      requiresLocalTests: false,
+      requiresLocalTestsEvidence: false
+    }, "")
+    // mined-antipattern guidance must be present so the runtime judge catches premature stops
+    assert.ok(prompt.includes("PERMISSION-SEEKING"), "permission-seeking antipattern missing")
+    assert.ok(prompt.includes("STOPPED-WITH-TODOS"), "stopped-with-todos antipattern missing")
+    assert.ok(prompt.includes("FALSE-COMPLETE"), "false-complete antipattern missing")
+    assert.ok(prompt.includes("LEGITIMATE STOP"), "legitimate-stop carve-out missing")
+    // carve-out must route genuine human blocks to waiting_for_user, not nag
+    assert.ok(prompt.includes("waiting_for_user"))
+  })
+
   it("includes tool reflection guidance in resolved reflection prompt", () => {
     const basePrompt = buildSelfAssessmentPrompt({
       taskSummary: "Implement feature",

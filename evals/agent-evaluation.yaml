@@ -4,10 +4,10 @@ prompts:
   - file://prompts/agent-evaluation.txt
 
 providers:
-  - id: azureopenai:chat:gpt-5
+  - id: azureopenai:chat:gpt-5.1
     label: azure-gpt-5
     config:
-      apiVersion: 2024-02-15-preview
+      apiVersion: 2024-12-01-preview
       apiKeyEnvar: AZURE_OPENAI_API_KEY
       reasoning_effort: low
       max_completion_tokens: 2048

@@ -1,0 +1,30 @@
+name: Publish opencode-reflection to npm
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # for npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install root deps (for TypeScript types)
+        run: npm ci
+
+      - name: Pack and publish opencode-reflection
+        working-directory: packages/reflection
+        run: |
+          npm install
+          npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

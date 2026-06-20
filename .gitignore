@@ -3,6 +3,8 @@
 !.agents/**
 !.github
 !.github/**
+!.claude-plugin
+!.claude-plugin/**
 !claude/.claude-plugin
 !claude/.claude-plugin/**
 .tts
@@ -43,5 +45,9 @@ evals/datasets/cc-stop-classified.jsonl
 
 # Working notes
 plan.md
+
 # Added by code-review-graph
 .code-review-graph/
+
+# Mined session dataset (may contain personal data)
+.dataset/
