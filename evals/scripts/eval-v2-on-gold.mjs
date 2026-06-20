@@ -1,155 +1,53 @@
-/**
- * judge.mjs — in-hook LLM classifier for Claude Code Stop hooks.
- *
- * Exported surface:
- *   classifyStop(stopContext, opts?) → Promise<Classification>
- *
- * stopContext shape (built by buildStopContext in reflect.mjs):
- *   { session_id, attempt, user_messages, final_assistant_text,
- *     tools_available_inferred, raw_tail }
- *
- * Classification shape:
- *   { category, reason, confidence, raw_text?, usage? }
- *
- * Auth: reads OAuth token from ~/.claude/.credentials.json — no API key needed.
- * Net:  POST https://api.anthropic.com/v1/messages via global fetch (Node 18+).
- * Deps: none (stdlib only).
- */
+#!/usr/bin/env node
+// eval-v2-on-gold.mjs — re-classify gold records with the v2 prompt and
+// compute accuracy vs gold_label.
+//
+// Usage:
+//   node evals/scripts/eval-v2-on-gold.mjs \
+//     --in evals/datasets/cc-stop-labeled-gold-redacted.jsonl
+// Outputs per-category accuracy + confusion matrix to stdout.
 
-import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from "node:fs";
+import { argv, stderr, stdout } from "node:process";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const API_URL = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_VERSION = '2023-06-01';
-const ANTHROPIC_BETA = 'oauth-2025-04-20';
-const DEFAULT_MODEL = process.env.REFLECTION_CC_MODEL ?? 'claude-haiku-4-5';
-const DEFAULT_TIMEOUT_MS = 15_000;
-const MAX_TOKENS = 250;
-
-const CATEGORIES = [
-  'complete',
-  'waiting_for_user_legitimate',
-  'tool_available_punt',
-  'summary_drift_stop',
-  'genuinely_stuck',
-  'working',
-];
-
-// ---------------------------------------------------------------------------
-// Error sanitization
-// ---------------------------------------------------------------------------
-
-/**
- * Strips credentials from response bodies / error text before it lands in
- * Error.message or debug logs. Truncates to 200 chars.
- *
- * @param {string} text
- * @returns {string}
- */
-function sanitizeError(text) {
-  if (typeof text !== 'string') text = String(text ?? '');
-  let s = text;
-  s = s.replace(/Bearer\s+[^\s"',}]+/gi, 'Bearer <REDACTED>');
-  s = s.replace(/"authorization"\s*:\s*"[^"]*"/gi, '"authorization":"<REDACTED>"');
-  s = s.replace(/"x-api-key"\s*:\s*"[^"]*"/gi, '"x-api-key":"<REDACTED>"');
-  if (s.length > 200) s = s.slice(0, 200);
-  return s;
+const args = parseArgs(argv.slice(2));
+const IN = args.in;
+if (!IN) {
+  stderr.write("ERROR: --in required\n");
+  process.exit(1);
 }
+const MODEL = args.model ?? "claude-haiku-4-5";
+const CONCURRENCY = parseInt(args.concurrency ?? "4", 10);
 
-// ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
-
-/**
- * Loads the OAuth access token from ~/.claude/.credentials.json.
- * Throws a sentinel error (prefixed "judge:") if the file is missing,
- * unreadable, or the token is absent/empty — caller treats this as no-inject.
- *
- * @returns {string} access token
- */
 function loadOAuthToken() {
-  const credPath = join(homedir(), '.claude', '.credentials.json');
-  let raw;
-  try {
-    raw = readFileSync(credPath, 'utf8');
-  } catch (err) {
-    throw new Error(`judge: cannot read credentials file: ${err.message}`);
-  }
-
-  let obj;
-  try {
-    obj = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`judge: credentials file is not valid JSON: ${err.message}`);
-  }
-
-  const token = obj?.claudeAiOauth?.accessToken;
-  if (!token) {
-    throw new Error('judge: no claudeAiOauth.accessToken in ~/.claude/.credentials.json');
-  }
-  return token;
+  const p = join(homedir(), ".claude", ".credentials.json");
+  return JSON.parse(readFileSync(p, "utf8")).claudeAiOauth?.accessToken;
 }
+const TOKEN = loadOAuthToken();
 
-// ---------------------------------------------------------------------------
-// Prompt
-// ---------------------------------------------------------------------------
-
-/**
- * Truncates a string to n characters, appending a truncation note if cut.
- * Mirrors the helper in classify-cc-stops.mjs verbatim.
- *
- * @param {string} s
- * @param {number} n
- * @returns {string}
- */
 function truncate(s, n) {
-  if (!s) return '';
-  if (s.length <= n) return s;
-  return s.slice(0, n) + `…[truncated ${s.length - n}ch]`;
+  if (!s) return "";
+  return s.length <= n ? s : s.slice(0, n) + `…[truncated ${s.length - n}ch]`;
 }
 
-/**
- * Truncates with head + tail preservation. Long final_assistant_text often
- * has both opening commitment and closing delivery; keeping both is critical
- * for accurate classification (see prompt-tune-v2 audit, #138).
- *
- * @param {string} s
- * @param {number} head - chars to keep from start
- * @param {number} tail - chars to keep from end
- * @returns {string}
- */
 function truncateHeadTail(s, head, tail) {
-  if (!s) return '';
+  if (!s) return "";
   if (s.length <= head + tail) return s;
   return s.slice(0, head) + `\n…[truncated ${s.length - head - tail}ch middle]…\n` + s.slice(-tail);
 }
 
-/**
- * Builds the classifier prompt from a stopContext object.
- *
- * IMPORTANT: This prompt is duplicated in three places that MUST stay in sync:
- *   - claude/lib/judge.mjs (this file — runs in the live hook)
- *   - evals/scripts/classify-cc-stops.mjs (offline CC labeling)
- *   - evals/scripts/classify-oc-stops.mjs (offline OC labeling)
- * Source of truth: evals/prompts/cc-stop-classifier.v2.txt
- * Follow-up: extract into a shared module the hook can import without I/O.
- *
- * @param {object} ctx - stopContext from buildStopContext()
- * @returns {string}
- */
-function buildPrompt(ctx) {
-  const userMsgs = (ctx.user_messages ?? [])
+// v2 prompt — must match claude/lib/judge.mjs verbatim
+function buildPrompt(record) {
+  const userMsgs = (record.user_messages ?? [])
     .map((m, i) => `[USER ${i + 1}] ${truncate(m, 1200)}`)
-    .join('\n\n');
-  // Head + tail truncation: long turns have both opening commitment and
-  // closing delivery; missing the closing leads to false-positive drift.
-  const finalText = truncateHeadTail(ctx.final_assistant_text ?? '', 1800, 2400);
-  const tools = (ctx.tools_available_inferred ?? []).join(', ');
+    .join("\n\n");
+  // final_assistant_text is the strongest signal — must include closing delivery.
+  // Long turns can be ~4-6kb; truncating too low hides the closing result.
+  // Use head+tail so we see both opening commitment AND closing delivery.
+  const finalText = truncateHeadTail(record.final_assistant_text ?? "", 1800, 2400);
+  const tools = (record.tools_available_inferred ?? []).join(", ");
 
   return `You classify how an assistant ended a turn at a Stop boundary. Pick ONE category.
 
@@ -170,10 +68,10 @@ CATEGORIES:
 - genuinely_stuck: assistant produced no closure: empty text, single filler word ("Continuing."), mid-sentence cut-off, or a thought that trails off ("Let me check if there's a mismatch..." with no continuation). No clear question, no clear delivery.
 - working: RARE. Only when the final turn is explicit raw "doing it now" with no narration of any finished step. If the agent reported ANY result or status, it is not \`working\`.
 
-TOOLS THE ASSISTANT HAD: ${tools || '(none recorded)'}
+TOOLS THE ASSISTANT HAD: ${tools || "(none recorded)"}
 
 USER MESSAGES (in order):
-${userMsgs || '(none)'}
+${userMsgs || "(none)"}
 
 FINAL ASSISTANT TEXT:
 ${finalText}
@@ -204,162 +102,102 @@ Respond ONLY with a JSON object on a single line, no markdown fence, no prose:
 {"category": "<one of: complete | waiting_for_user_legitimate | tool_available_punt | summary_drift_stop | genuinely_stuck | working>", "reason": "<one short sentence>", "confidence": <0.0-1.0>}`;
 }
 
-// ---------------------------------------------------------------------------
-// Response parsing
-// ---------------------------------------------------------------------------
-
-/**
- * Strips code fences, finds the first {...} block, and JSON.parses it.
- * Validates that category is one of the 6 known values.
- *
- * @param {string} text - raw text from the model
- * @param {object} [usage] - token usage from the API response
- * @returns {{ category: string, reason: string, confidence: number, raw_text: string, usage?: object }}
- */
-function parseResponse(text, usage) {
-  let s = text.trim();
-
-  // Strip code fences if the model added them despite instructions
-  if (s.startsWith('```')) {
-    s = s.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
-  }
-
-  const match = s.match(/\{[\s\S]*\}/);
-  if (!match) {
-    return {
-      category: 'PARSE_ERROR',
-      reason: `no json found: ${s.slice(0, 100)}`,
-      confidence: 0,
-      raw_text: text,
-      usage,
-    };
-  }
-
-  let obj;
-  try {
-    obj = JSON.parse(match[0]);
-  } catch (err) {
-    return {
-      category: 'PARSE_ERROR',
-      reason: err.message,
-      confidence: 0,
-      raw_text: text,
-      usage,
-    };
-  }
-
-  if (!CATEGORIES.includes(obj.category)) {
-    return {
-      category: 'PARSE_ERROR',
-      reason: `unknown category: ${obj.category}`,
-      confidence: 0,
-      raw_text: text,
-      usage,
-    };
-  }
-
-  return {
-    category: obj.category,
-    reason: obj.reason ?? '',
-    confidence: typeof obj.confidence === 'number' ? obj.confidence : 0,
-    raw_text: text,
-    usage,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/**
- * Classifies a Claude Code Stop event using a judge LLM call.
- *
- * @param {object} stopContext - built by buildStopContext() in reflect.mjs:
- *   { session_id, attempt, user_messages, final_assistant_text,
- *     tools_available_inferred, raw_tail }
- * @param {object} [opts]
- * @param {string}      [opts.model]     - override model (default: REFLECTION_CC_MODEL or claude-haiku-4-5)
- * @param {number}      [opts.timeoutMs] - override timeout in ms (default: 15000)
- * @param {AbortSignal} [opts.signal]    - external cancellation signal
- * @returns {Promise<{ category: string, reason: string, confidence: number, raw_text?: string, usage?: object }>}
- */
-export async function classifyStop(stopContext, opts = {}) {
-  const model = opts.model ?? DEFAULT_MODEL;
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-
-  // Load token — throws "judge: ..." on failure (caller treats as no-inject)
-  let token;
-  try {
-    token = loadOAuthToken();
-  } catch (err) {
-    throw err; // already prefixed with "judge:"
-  }
-
-  const prompt = buildPrompt(stopContext);
-
-  const body = JSON.stringify({
-    model,
-    max_tokens: MAX_TOKENS,
-    system: 'You are a precise classifier. Output JSON only.',
-    messages: [{ role: 'user', content: prompt }],
+async function callApi(prompt, attempt = 1) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "oauth-2025-04-20",
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 250,
+      system: "You are a precise classifier. Output JSON only.",
+      messages: [{ role: "user", content: prompt }],
+    }),
   });
-
-  // Compose abort signal: hard timeout + optional caller signal
-  const timeoutController = new AbortController();
-  const timerId = setTimeout(() => timeoutController.abort(), timeoutMs);
-
-  // Merge caller signal if provided
-  let signal = timeoutController.signal;
-  if (opts.signal) {
-    // If either aborts, abort both
-    opts.signal.addEventListener('abort', () => timeoutController.abort(), { once: true });
-    // We still use timeoutController.signal — it fires on timeout OR on opts.signal abort
+  if (res.status === 429 || res.status >= 500) {
+    if (attempt > 4) throw new Error(`api ${res.status} after ${attempt}`);
+    await new Promise(r => setTimeout(r, Math.min(60000, 2000 * 2 ** attempt)));
+    return callApi(prompt, attempt + 1);
   }
-
-  let res;
-  try {
-    res = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'anthropic-version': ANTHROPIC_VERSION,
-        'anthropic-beta': ANTHROPIC_BETA,
-        'authorization': `Bearer ${token}`,
-        'content-type': 'application/json',
-      },
-      body,
-      signal,
-    });
-  } catch (err) {
-    clearTimeout(timerId);
-    if (timeoutController.signal.aborted) {
-      return {
-        category: 'TIMEOUT',
-        reason: `judge call exceeded ${timeoutMs}ms`,
-        confidence: 0,
-      };
-    }
-    throw new Error(`judge: fetch failed: ${sanitizeError(err.message)}`);
-  } finally {
-    clearTimeout(timerId);
-  }
-
-  if (!res.ok) {
-    let body;
-    try { body = await res.text(); } catch { body = ''; }
-    throw new Error(`judge: api ${res.status}: ${sanitizeError(body)}`);
-  }
-
-  let json;
-  try {
-    json = await res.json();
-  } catch (err) {
-    throw new Error(`judge: failed to parse api response: ${sanitizeError(err.message)}`);
-  }
-
-  const rawText = json.content?.[0]?.text ?? '';
-  const usage = json.usage
-    ? { input_tokens: json.usage.input_tokens, output_tokens: json.usage.output_tokens }
-    : undefined;
-
-  return parseResponse(rawText, usage);
+  if (!res.ok) throw new Error(`api ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const j = await res.json();
+  const text = (j.content?.[0]?.text ?? "").trim();
+  const s = text.startsWith("```")
+    ? text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim()
+    : text;
+  const m = s.match(/\{[\s\S]*\}/);
+  if (!m) return { category: "PARSE_ERROR", reason: text.slice(0, 100), confidence: 0 };
+  try { return JSON.parse(m[0]); }
+  catch (e) { return { category: "PARSE_ERROR", reason: e.message, confidence: 0 }; }
 }
+
+async function main() {
+  const lines = readFileSync(IN, "utf8").split("\n").filter(Boolean);
+  const records = lines.map(l => JSON.parse(l));
+  stderr.write(`Loaded ${records.length} gold records from ${IN}\n`);
+
+  const results = new Array(records.length);
+  let done = 0;
+  async function worker(i) {
+    while (i < records.length) {
+      const r = records[i];
+      i += CONCURRENCY;
+      try {
+        const v2 = await callApi(buildPrompt(r));
+        results[i - CONCURRENCY] = { gold: r.gold_label, v1: r.classification?.category, v2: v2.category, reason: v2.reason };
+      } catch (e) {
+        results[i - CONCURRENCY] = { gold: r.gold_label, v1: r.classification?.category, v2: "ERROR", reason: e.message };
+      }
+      done++;
+      if (done % 5 === 0) stderr.write(`  [${done}/${records.length}]\n`);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, records.length) }, (_, k) => worker(k)));
+
+  // Accuracy
+  const v1ok = results.filter(r => r.v1 === r.gold).length;
+  const v2ok = results.filter(r => r.v2 === r.gold).length;
+  const total = results.length;
+
+  // Per-category
+  const cats = [...new Set(results.flatMap(r => [r.gold, r.v2]))].filter(Boolean);
+  stderr.write(`\n=== ACCURACY ===\n`);
+  stderr.write(`v1: ${v1ok}/${total} = ${(100*v1ok/total).toFixed(1)}%\n`);
+  stderr.write(`v2: ${v2ok}/${total} = ${(100*v2ok/total).toFixed(1)}%\n\n`);
+
+  stderr.write(`=== PER-CATEGORY (gold→v2 match) ===\n`);
+  for (const c of [...cats].sort()) {
+    const goldRows = results.filter(r => r.gold === c);
+    if (!goldRows.length) continue;
+    const v1m = goldRows.filter(r => r.v1 === c).length;
+    const v2m = goldRows.filter(r => r.v2 === c).length;
+    stderr.write(`  ${c.padEnd(30)}  gold=${String(goldRows.length).padStart(2)}  v1=${v1m}/${goldRows.length}  v2=${v2m}/${goldRows.length}\n`);
+  }
+
+  stderr.write(`\n=== CONFUSION (gold → v2) ===\n`);
+  const conf = new Map();
+  for (const r of results) {
+    const k = `${r.gold} → ${r.v2}`;
+    conf.set(k, (conf.get(k) ?? 0) + 1);
+  }
+  for (const [k, v] of [...conf.entries()].sort((a, b) => b[1] - a[1])) {
+    stderr.write(`  ${String(v).padStart(2)}  ${k}\n`);
+  }
+
+  // Per-row dump
+  stdout.write(JSON.stringify({ summary: { v1ok, v2ok, total }, rows: results }, null, 2) + "\n");
+}
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i].startsWith("--")) { out[argv[i].slice(2)] = argv[i + 1]; i++; }
+  }
+  return out;
+}
+
+main().catch(e => { stderr.write(`FATAL: ${e.stack}\n`); process.exit(1); });

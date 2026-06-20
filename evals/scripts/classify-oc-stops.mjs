@@ -1,24 +1,27 @@
 #!/usr/bin/env node
-// classify-cc-stops.mjs — call Claude Haiku 4.5 via the Anthropic API to
-// classify each candidate Stop into one of 6 categories.
+// classify-oc-stops.mjs — call Claude Haiku 4.5 via the Anthropic API to
+// classify each OpenCode Stop candidate into one of 6 categories.
 //
-// Auth: reads OAuth access token from ~/.claude/.credentials.json (the user's
-// existing Claude Code Max subscription). No new API key needed.
+// Mirrors classify-cc-stops.mjs (the CC pipeline). Auth is the same Claude
+// Code Max OAuth token (~/.claude/.credentials.json).
 //
-// Output: one JSON object per line, original record + .classification block:
-//   { ...original fields, classification: { category, reason, confidence } }
+// Default paths:
+//   --in  evals/datasets/oc-stop-candidates-raw.jsonl
+//         (raw miner output — no heuristic filter for OC yet; we classify
+//          the full set so we can see baseline distribution)
+//   --out evals/datasets/oc-stop-classified.jsonl
 //
-// Resume: if --out file already exists, skips records whose
-// (session_id + stop_index) already appear classified — safe to re-run.
+// Resume: if --out already exists, skips records whose
+// (session_id + stop_index) already appear — safe to re-run.
 
-import { readFileSync, writeFileSync, existsSync, appendFileSync } from "node:fs";
+import { readFileSync, existsSync, appendFileSync } from "node:fs";
 import { argv, exit, stderr } from "node:process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const args = parseArgs(argv.slice(2));
-const IN_PATH = args.in ?? "evals/datasets/cc-stop-candidates-filtered.jsonl";
-const OUT_PATH = args.out ?? "evals/datasets/cc-stop-classified.jsonl";
+const IN_PATH = args.in ?? "evals/datasets/oc-stop-candidates-raw.jsonl";
+const OUT_PATH = args.out ?? "evals/datasets/oc-stop-classified.jsonl";
 const LIMIT = args.limit ? parseInt(args.limit, 10) : Infinity;
 const CONCURRENCY = parseInt(args.concurrency ?? "4", 10);
 const MODEL = args.model ?? "claude-haiku-4-5";
@@ -45,7 +48,7 @@ if (!TOKEN) {
   exit(1);
 }
 
-// v2 prompt — kept in sync with claude/lib/judge.mjs and classify-oc-stops.mjs.
+// v2 prompt — kept in sync with claude/lib/judge.mjs and classify-cc-stops.mjs.
 // Source of truth: evals/prompts/cc-stop-classifier.v2.txt
 function buildPrompt(record) {
   const userMsgs = (record.user_messages ?? [])
@@ -70,7 +73,7 @@ Sentences like "Try X", "Use /clear", "Run npm test", "Check Y", "Look at Z" dir
 CATEGORIES:
 - complete: task delivered. Includes status reports, results, conclusions, acknowledgements ("Ignored.", "Done."), and delivery wrap-ups that mention what the user CAN do later ("you can disable this with X", "watch over the next few days for Y"). Discriminator: phrasing is directed at the user ("you can", "for you to", "watch over time") and the assistant has no open action it claimed it would take next.
 - waiting_for_user_legitimate: assistant asks a question ONLY the user can answer (preference, missing private info, permission to proceed, choice between options). The question is not answerable by any tool.
-- tool_available_punt: assistant asks the user something the available tools could resolve. If TOOLS THE ASSISTANT HAD includes anything that could answer (Bash for shell state, Read/Glob/Grep for file content, WebFetch for URLs, browser MCP for live UI, etc.), and the assistant asks the user for that info instead of using the tool, prefer this over \`waiting_for_user_legitimate\`.
+- tool_available_punt: assistant asks the user something the available tools could resolve. If TOOLS THE ASSISTANT HAD includes anything that could answer (bash for shell state, read/glob/grep for file content, webfetch for URLs, browser tools for live UI, etc.), and the assistant asks the user for that info instead of using the tool, prefer this over \`waiting_for_user_legitimate\`.
 - summary_drift_stop: assistant wrote a plan/summary that CLAIMS an ACTIVE next step it intends to take itself (run a tool, write code, commit, open a PR), then stopped before doing it. Marker phrases for ACTIVE next steps: "I will run", "I'll commit", "Next I'll", "Let me now run/edit/write", "Now I'm going to ...". Numbered execution plans count too. Discriminator vs \`complete\`: (a) "I will do X" where X is action only the agent can take = drift. (b) "you can do X" / "feel free to" / "watch X over time" = complete (guidance to user). (c) "Will report when background job finishes" / "Will notify when deploy completes" / "Monitor armed, will share results" = COMPLETE (passive waiting on something already running). (d) "I can do X" / "Next I can run X" / "If you want, I can X" = COMPLETE (offer to user, not commitment). Drift needs commitment ("I will", "Let me now", numbered plan), not capability. (e) Present-tense process narration that DELIVERS a finding ("I'm checking X" ending with a concrete observation) = COMPLETE (status delivery). Drift requires a *named next action* that did not happen. (f) Next-steps list as user hand-off ("Next steps: 1. ...") with no "I will" = COMPLETE (task hand-off). "Next I'll run tests" = drift.
 - genuinely_stuck: assistant produced no closure: empty text, single filler word ("Continuing."), mid-sentence cut-off, or a thought that trails off ("Let me check if there's a mismatch..." with no continuation). No clear question, no clear delivery.
 - working: RARE. Only when the final turn is explicit raw "doing it now" with no narration of any finished step. If the agent reported ANY result or status, it is not \`working\`.
@@ -88,15 +91,15 @@ A — complete: FINAL "Deployed. To disable later: flip the flag in config.ts. W
 B — summary_drift_stop: FINAL "I've created the file. Next I'll run the tests and commit." → {"category":"summary_drift_stop","reason":"claimed agent next step but stopped","confidence":0.9}
 C — complete: FINAL "Monitor armed. Will report per-job results + final status." → {"category":"complete","reason":"status delivered, monitoring is passive","confidence":0.85}
 D — waiting_for_user_legitimate: FINAL "Which do you prefer — single post or series?" → {"category":"waiting_for_user_legitimate","reason":"user preference no tool can answer","confidence":0.9}
-E — tool_available_punt: TOOLS Bash,Read,WebFetch. FINAL "What does the PR description say? Paste it here." → {"category":"tool_available_punt","reason":"WebFetch/gh could pull PR description","confidence":0.85}
+E — tool_available_punt: TOOLS bash,read,webfetch. FINAL "What does the PR description say? Paste it here." → {"category":"tool_available_punt","reason":"webfetch/gh could pull PR description","confidence":0.85}
 F — genuinely_stuck: FINAL "Continuing." → {"category":"genuinely_stuck","reason":"single-word non-closure","confidence":0.9}
 G — complete: FINAL "Ignored — stale monitor noise." → {"category":"complete","reason":"terse acknowledgement, no open action","confidence":0.85}
 H — summary_drift_stop: FINAL "1. Run tests. 2. Commit. 3. Open PR." → {"category":"summary_drift_stop","reason":"numbered execution plan the agent owns, no step taken","confidence":0.9}
 I — waiting_for_user_legitimate: FINAL "If you want, I can patch this now. Want me to?" → {"category":"waiting_for_user_legitimate","reason":"explicit permission request","confidence":0.8}
-J — tool_available_punt: TOOLS Bash,Read,Edit. FINAL "What does \`git status\` show in your worktree?" → {"category":"tool_available_punt","reason":"Bash could run git status","confidence":0.9}
-K — complete (background tasks running): FINAL "PR #1376 merged. 3 worktree agents still running (homepage CTA, bot one-tap, Sentry triage). Will report as they land." → {"category":"complete","reason":"PR shipped; pending agents are passive — agent is not actively doing more work this turn","confidence":0.85}
+J — tool_available_punt: TOOLS bash,read,edit. FINAL "What does \`git status\` show in your worktree?" → {"category":"tool_available_punt","reason":"bash could run git status","confidence":0.9}
+K — complete (background tasks running): FINAL "PR #1376 merged. 3 worktree agents still running. Will report as they land." → {"category":"complete","reason":"PR shipped; pending agents are passive — agent is not actively doing more work this turn","confidence":0.85}
 L — complete (system error is delivery, not drift): FINAL "API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment." → {"category":"complete","reason":"system status delivered, no agent action open","confidence":0.85}
-M — complete (subagent fan-out): FINAL "Subagent is running — probing RSS feeds and sitemaps. I'll share findings when it reports back." → {"category":"complete","reason":"dispatched subagent + passive wait, no claimed agent action this turn","confidence":0.85}
+M — complete (subagent fan-out): FINAL "Subagent is running — probing RSS feeds. I'll share findings when it reports back." → {"category":"complete","reason":"dispatched subagent + passive wait, no claimed agent action this turn","confidence":0.85}
 N — complete ("I can do X" is offer, not commitment): FINAL "UI updated, tests pass. Next I can run the full pre-merge suite if you want." → {"category":"complete","reason":"work delivered + capability offer ('I can'), no committed next action","confidence":0.85}
 O — complete (present-tense process narration that delivers a finding): FINAL "I'm checking whether the blocked conclusion missed usable context. Looked at the last 3 turns — no missed context, conclusion stands." → {"category":"complete","reason":"present-tense narration that delivered a concrete finding","confidence":0.85}
 P — complete (next-steps list as user hand-off, no "I will"): FINAL "Shipped. Next steps for you: 1. Verify in staging 2. Roll out to prod 3. Monitor error rate." → {"category":"complete","reason":"next-steps list directed at user, no agent commitment","confidence":0.9}
@@ -159,12 +162,10 @@ async function callApi(prompt, attempt = 1) {
 }
 
 function parseClassification(text, usage) {
-  // Strip code fences if model added them despite instructions
   let s = text.trim();
   if (s.startsWith("```")) {
     s = s.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
   }
-  // Find the JSON object
   const match = s.match(/\{[\s\S]*\}/);
   if (!match) {
     return { category: "PARSE_ERROR", reason: `no json: ${s.slice(0, 100)}`, confidence: 0, _usage: usage };
