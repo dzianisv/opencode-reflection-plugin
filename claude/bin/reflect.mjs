@@ -366,7 +366,7 @@ export function buildStopContext(stopPayload, transcriptTail) {
       const entry = transcriptTail[i];
       if (entry.type !== 'assistant') continue;
       const content = entry?.message?.content;
-      if (!Array.isArray(content)) break;
+      if (!Array.isArray(content)) continue;
       const textBlocks = content.filter((c) => c?.type === 'text');
       if (textBlocks.length > 0) {
         final_assistant_text = textBlocks.map((b) => b.text).join('\n').trim();
