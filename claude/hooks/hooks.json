@@ -1,15 +1,8 @@
 {
   "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/reflect.mjs",
-            "timeout": 30
-          }
-        ]
-      }
-    ]
+    "stop": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/reflect.mjs",
+      "timeout": 30000
+    }
   }
 }

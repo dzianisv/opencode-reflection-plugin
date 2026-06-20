@@ -1,13 +1,13 @@
 {
   "name": "reflection-cc",
-  "displayName": "Reflection (Claude Code)",
   "version": "0.1.0",
-  "description": "Re-prompts Claude Code when it stops prematurely — catches PERMISSION-SEEKING, STOPPED-WITH-TODOS, and FALSE-COMPLETE failure modes, and injects targeted recovery instructions.",
-  "author": {
-    "name": "dzianisv",
-    "url": "https://github.com/dzianisv"
-  },
-  "repository": "https://github.com/dzianisv/opencode-plugins",
+  "description": "Re-prompts Claude Code when it stops prematurely due to failure modes like summary-drift-stop or tool-available-punt",
+  "author": "dzianisv",
   "license": "MIT",
-  "hooks": "./hooks/hooks.json"
+  "hooks": {
+    "stop": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/reflect.mjs",
+      "timeout": 30000
+    }
+  }
 }

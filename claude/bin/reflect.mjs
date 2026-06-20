@@ -357,17 +357,16 @@ export function buildStopContext(stopPayload, transcriptTail) {
     }
   }
 
-  // Derive final assistant text: prefer CC's `last_assistant_message` field (the
-  // documented Stop hook field name as of CC v2.x — NOT `response`), fall back
-  // to the last assistant entry's text content from the transcript tail.
-  let final_assistant_text = (stopPayload?.last_assistant_message ?? stopPayload?.response ?? '').trim();
+  // Derive final assistant text: prefer CC's `response` field (it IS the last turn),
+  // fall back to the last assistant entry's text content from the tail.
+  let final_assistant_text = (stopPayload?.response ?? '').trim();
   if (!final_assistant_text) {
     // Walk tail in reverse, find last assistant entry with a text block
     for (let i = transcriptTail.length - 1; i >= 0; i--) {
       const entry = transcriptTail[i];
       if (entry.type !== 'assistant') continue;
       const content = entry?.message?.content;
-      if (!Array.isArray(content)) break;
+      if (!Array.isArray(content)) continue;
       const textBlocks = content.filter((c) => c?.type === 'text');
       if (textBlocks.length > 0) {
         final_assistant_text = textBlocks.map((b) => b.text).join('\n').trim();
@@ -446,27 +445,6 @@ async function main() {
   // Sanitize cwd from payload before any fs writes — throws on invalid input.
   // uncaughtException handler exits 0 (fail-safe: no inject, no fs ops).
   const cwd = sanitizeCwd(payload?.cwd ?? process.cwd());
-
-  // ── 1.5. SESSION-SCOPED DISABLED CHECK ──────────────────────────────────
-  // Write current session ID so agents can reference it without knowing it upfront:
-  //   cat .reflection/current_session
-  // Disable this session:
-  //   echo "SESSION_ID" >> .reflection/disabled
-  // Enable:
-  //   grep -v "SESSION_ID" .reflection/disabled > .reflection/disabled.tmp && mv .reflection/disabled.tmp .reflection/disabled
-  const reflDir = path.join(cwd, '.reflection');
-  fs.mkdirSync(reflDir, { recursive: true });
-  fs.writeFileSync(path.join(reflDir, 'current_session'), session_id, 'utf8');
-
-  const disabledFlag = path.join(reflDir, 'disabled');
-  try {
-    const disabledIds = fs.readFileSync(disabledFlag, 'utf8')
-      .split('\n').map(l => l.trim()).filter(Boolean);
-    if (disabledIds.includes(session_id)) {
-      debug({ msg: 'disabled_for_session', session_id }, cwd);
-      process.exit(0);
-    }
-  } catch { /* file absent = not disabled */ }
 
   // ── 2. ATTEMPT CAP ────────────────────────────────────────────────────────
   const attempts = readAttempts(session_id, cwd);

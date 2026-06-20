@@ -49,13 +49,7 @@ function loadOAuthToken() {
   }
 }
 
-// Lazy-load TOKEN — only called when running scenarios that need real API access
-// (scenarios 1-3). Scenario 4 (direct-pipe) does not need this.
-let _token;
-function getToken() {
-  if (!_token) _token = loadOAuthToken();
-  return _token;
-}
+const TOKEN = loadOAuthToken();
 
 // --------------------------------------------------------------------------
 // Scenarios
@@ -148,21 +142,17 @@ function runDirectPipeScenario() {
     transcript_path: tFile,
     cwd: sandbox,
     hook_event_name: "Stop",
-    last_assistant_message: "I've created factorial.py and test_factorial.py. Next step: run `python -m pytest test_factorial.py -v` to verify the tests pass.",
+    response: "I've created factorial.py and test_factorial.py. Next step: run `python -m pytest test_factorial.py -v` to verify the tests pass.",
     stop_hook_active: false,
   };
 
-  // Use REFLECTION_CC_FAKE_JUDGE so this test exercises the full hook wiring
-  // (stdin parsing, loop guard, attempt counter, feedback builder, stdout JSON)
-  // without a real API call. The mock returns summary_drift_stop:0.95, which
-  // the feedback builder maps to a block decision — exactly the inject path.
   const startTime = Date.now();
   const result = spawnSync("node", [join(PLUGIN_DIR, "bin", "reflect.mjs")], {
     input: JSON.stringify(payload),
     cwd: sandbox,
     timeout: 30_000,
     encoding: "utf8",
-    env: { ...process.env, REFLECTION_CC_DEBUG: "1", REFLECTION_CC_FAKE_JUDGE: "summary_drift_stop:0.95" },
+    env: { ...process.env, REFLECTION_CC_DEBUG: "1" },
   });
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
@@ -298,7 +288,7 @@ Respond ONLY with a JSON object on a single line, no markdown fence:
     headers: {
       "anthropic-version": "2023-06-01",
       "anthropic-beta": "oauth-2025-04-20",
-      "authorization": `Bearer ${getToken()}`,
+      "authorization": `Bearer ${TOKEN}`,
       "content-type": "application/json",
     },
     body: JSON.stringify({
@@ -404,312 +394,8 @@ function runScenario(scenario) {
   return { scenario, result, sandbox, transcriptPath, evidenceDir, elapsed };
 }
 
-// --------------------------------------------------------------------------
-// Scenario 5: direct-pipe complete — fake judge returns "complete", verify
-// NO block is emitted (exit 0, stdout is empty or not a block decision).
-// --------------------------------------------------------------------------
-
-function runDirectPipeCompleteScenario() {
-  const id = 5;
-  const name = "direct_pipe_complete_no_inject";
-  const sandbox = join(tmpdir(), "cc-reflect-e2e", `s${id}-${Date.now()}`);
-  mkdirSync(sandbox, { recursive: true, mode: 0o700 });
-  const evidenceDir = join(EVIDENCE_DIR, `scenario-${id}-${name}`);
-  mkdirSync(evidenceDir, { recursive: true });
-
-  process.stderr.write(`\n[s${id}] ${name}\n`);
-  process.stderr.write(`  sandbox  : ${sandbox}\n`);
-  process.stderr.write(`  evidence : ${evidenceDir}\n`);
-
-  const fakeSessionId = "test-complete-" + Date.now();
-  const tFile = join(sandbox, `transcript-${fakeSessionId}.jsonl`);
-  const entries = [
-    { type: "user", uuid: "u1", sessionId: fakeSessionId, message: { role: "user", content: "What is 2 + 2?" } },
-    { type: "assistant", uuid: "a1", sessionId: fakeSessionId, message: { role: "assistant", content: [{ type: "text", text: "4" }] } },
-  ];
-  writeFileSync(tFile, entries.map(e => JSON.stringify(e)).join("\n") + "\n");
-
-  const payload = {
-    session_id: fakeSessionId,
-    transcript_path: tFile,
-    cwd: sandbox,
-    hook_event_name: "Stop",
-    last_assistant_message: "4",
-    stop_hook_active: false,
-  };
-
-  const startTime = Date.now();
-  const result = spawnSync("node", [join(PLUGIN_DIR, "bin", "reflect.mjs")], {
-    input: JSON.stringify(payload),
-    cwd: sandbox,
-    timeout: 30_000,
-    encoding: "utf8",
-    // Fake judge returns "complete" → plugin must NOT emit a block decision
-    env: { ...process.env, REFLECTION_CC_DEBUG: "1", REFLECTION_CC_FAKE_JUDGE: "complete:0.99" },
-  });
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-
-  writeFileSync(join(evidenceDir, "stdin.json"), JSON.stringify(payload, null, 2));
-  writeFileSync(join(evidenceDir, "stdout.txt"), result.stdout ?? "");
-  writeFileSync(join(evidenceDir, "stderr.txt"), result.stderr ?? "");
-
-  let stdout = {};
-  try { stdout = JSON.parse(result.stdout ?? "{}"); } catch {}
-
-  const didBlock = stdout.decision === "block";
-  let verdict = "FAIL";
-  let reason;
-  if (result.status !== 0) {
-    reason = `reflect.mjs exited non-zero: ${result.status}`;
-  } else if (didBlock) {
-    reason = `false positive: plugin blocked a 'complete' verdict (reason: ${stdout.reason?.slice(0, 80)})`;
-  } else {
-    verdict = "PASS";
-    reason = "no block emitted on complete verdict (correct)";
-  }
-
-  process.stderr.write(`  exit=${result.status} elapsed=${elapsed}s\n`);
-  process.stderr.write(`  verdict : ${verdict} — ${reason}\n`);
-
-  writeFileSync(join(evidenceDir, "verdict.json"), JSON.stringify({
-    scenario: name,
-    verdict,
-    reason,
-    actual_stdout: stdout,
-    exit_code: result.status,
-    elapsed_s: elapsed,
-  }, null, 2));
-
-  if (!KEEP) {
-    try { rmSync(sandbox, { recursive: true, force: true }); } catch {}
-  }
-
-  return {
-    scenario: name,
-    expectsInject: false,
-    injects: didBlock ? 1 : 0,
-    verdict,
-    reason,
-    elapsed_s: elapsed,
-  };
-}
-
-// --------------------------------------------------------------------------
-// Scenario 6: disabled session is skipped — session ID in .reflection/disabled,
-// hook must exit 0 without emitting a block even on a drift transcript.
-// --------------------------------------------------------------------------
-
-function runToggleDisabledSkipsScenario() {
-  const id = 6;
-  const name = "toggle_disabled_session_skips";
-  const sandbox = join(tmpdir(), "cc-reflect-e2e", `s${id}-${Date.now()}`);
-  mkdirSync(sandbox, { recursive: true, mode: 0o700 });
-  const evidenceDir = join(EVIDENCE_DIR, `scenario-${id}-${name}`);
-  mkdirSync(evidenceDir, { recursive: true });
-
-  process.stderr.write(`\n[s${id}] ${name}\n`);
-  process.stderr.write(`  sandbox  : ${sandbox}\n`);
-
-  const sessionId = "disabled-session-" + Date.now();
-
-  // Write the session ID into .reflection/disabled before the hook fires.
-  const reflDir = join(sandbox, ".reflection");
-  mkdirSync(reflDir, { recursive: true });
-  writeFileSync(join(reflDir, "disabled"), sessionId + "\n");
-
-  const tFile = join(sandbox, `transcript-${sessionId}.jsonl`);
-  const entries = [
-    { type: "user", uuid: "u1", sessionId, message: { role: "user", content: "Write a file and run tests." } },
-    { type: "assistant", uuid: "a1", sessionId, message: { role: "assistant", content: [{ type: "text", text: "I wrote the file. Next step: run pytest to verify." }] } },
-  ];
-  writeFileSync(tFile, entries.map(e => JSON.stringify(e)).join("\n") + "\n");
-
-  const payload = {
-    session_id: sessionId,
-    transcript_path: tFile,
-    cwd: sandbox,
-    last_assistant_message: "I wrote the file. Next step: run pytest to verify.",
-    stop_hook_active: false,
-  };
-
-  const startTime = Date.now();
-  const result = spawnSync("node", [join(PLUGIN_DIR, "bin", "reflect.mjs")], {
-    input: JSON.stringify(payload),
-    cwd: sandbox,
-    timeout: 30_000,
-    encoding: "utf8",
-    // FAKE_JUDGE would return summary_drift_stop, but the disabled check must
-    // fire BEFORE the judge is ever called — so block must NOT be emitted.
-    env: { ...process.env, REFLECTION_CC_DEBUG: "1", REFLECTION_CC_FAKE_JUDGE: "summary_drift_stop:0.95" },
-  });
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-
-  writeFileSync(join(evidenceDir, "stdin.json"), JSON.stringify(payload, null, 2));
-  writeFileSync(join(evidenceDir, "stdout.txt"), result.stdout ?? "");
-  writeFileSync(join(evidenceDir, "stderr.txt"), result.stderr ?? "");
-  for (const f of readdirSync(reflDir)) {
-    try { writeFileSync(join(evidenceDir, f), readFileSync(join(reflDir, f))); } catch {}
-  }
-
-  let stdout = {};
-  try { stdout = JSON.parse(result.stdout ?? "{}"); } catch {}
-
-  const blocked = stdout.decision === "block";
-  let verdict, reason;
-  if (result.status !== 0) {
-    verdict = "FAIL"; reason = `reflect.mjs exited non-zero: ${result.status}`;
-  } else if (blocked) {
-    verdict = "FAIL"; reason = "plugin injected despite session being in disabled list";
-  } else {
-    verdict = "PASS"; reason = "hook skipped (no block) for disabled session ID";
-  }
-
-  process.stderr.write(`  exit=${result.status} elapsed=${elapsed}s\n`);
-  process.stderr.write(`  verdict : ${verdict} — ${reason}\n`);
-  writeFileSync(join(evidenceDir, "verdict.json"), JSON.stringify({ scenario: name, verdict, reason, exit_code: result.status, elapsed_s: elapsed }, null, 2));
-  if (!KEEP) try { rmSync(sandbox, { recursive: true, force: true }); } catch {}
-  return { scenario: name, expectsInject: false, injects: blocked ? 1 : 0, verdict, reason, elapsed_s: elapsed };
-}
-
-// --------------------------------------------------------------------------
-// Scenario 7: other session is unaffected — session A is in .reflection/disabled,
-// session B fires with a drift transcript and MUST still receive a block.
-// --------------------------------------------------------------------------
-
-function runToggleOtherSessionUnaffectedScenario() {
-  const id = 7;
-  const name = "toggle_other_session_unaffected";
-  const sandbox = join(tmpdir(), "cc-reflect-e2e", `s${id}-${Date.now()}`);
-  mkdirSync(sandbox, { recursive: true, mode: 0o700 });
-  const evidenceDir = join(EVIDENCE_DIR, `scenario-${id}-${name}`);
-  mkdirSync(evidenceDir, { recursive: true });
-
-  process.stderr.write(`\n[s${id}] ${name}\n`);
-  process.stderr.write(`  sandbox  : ${sandbox}\n`);
-
-  const disabledSessionId = "disabled-other-" + Date.now();
-  const activeSessionId   = "active-session-" + Date.now();
-
-  // Only the OTHER session is disabled; the active session must still run.
-  const reflDir = join(sandbox, ".reflection");
-  mkdirSync(reflDir, { recursive: true });
-  writeFileSync(join(reflDir, "disabled"), disabledSessionId + "\n");
-
-  const tFile = join(sandbox, `transcript-${activeSessionId}.jsonl`);
-  const entries = [
-    { type: "user", uuid: "u1", sessionId: activeSessionId, message: { role: "user", content: "Write a Python factorial and test it." } },
-    { type: "assistant", uuid: "a1", sessionId: activeSessionId, message: { role: "assistant", content: [{ type: "text", text: "Created factorial.py. Next: run pytest." }] } },
-  ];
-  writeFileSync(tFile, entries.map(e => JSON.stringify(e)).join("\n") + "\n");
-
-  const payload = {
-    session_id: activeSessionId,
-    transcript_path: tFile,
-    cwd: sandbox,
-    last_assistant_message: "Created factorial.py. Next: run pytest.",
-    stop_hook_active: false,
-  };
-
-  const startTime = Date.now();
-  const result = spawnSync("node", [join(PLUGIN_DIR, "bin", "reflect.mjs")], {
-    input: JSON.stringify(payload),
-    cwd: sandbox,
-    timeout: 30_000,
-    encoding: "utf8",
-    env: { ...process.env, REFLECTION_CC_DEBUG: "1", REFLECTION_CC_FAKE_JUDGE: "summary_drift_stop:0.95" },
-  });
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-
-  writeFileSync(join(evidenceDir, "stdin.json"), JSON.stringify(payload, null, 2));
-  writeFileSync(join(evidenceDir, "stdout.txt"), result.stdout ?? "");
-  writeFileSync(join(evidenceDir, "stderr.txt"), result.stderr ?? "");
-
-  let stdout = {};
-  try { stdout = JSON.parse(result.stdout ?? "{}"); } catch {}
-
-  const blocked = stdout.decision === "block";
-  let verdict, reason;
-  if (result.status !== 0) {
-    verdict = "FAIL"; reason = `reflect.mjs exited non-zero: ${result.status}`;
-  } else if (!blocked) {
-    verdict = "FAIL"; reason = "active session was not blocked — disabled list for OTHER session leaked over";
-  } else {
-    verdict = "PASS"; reason = "active session blocked correctly; disabled list for other session had no effect";
-  }
-
-  process.stderr.write(`  exit=${result.status} elapsed=${elapsed}s\n`);
-  process.stderr.write(`  verdict : ${verdict} — ${reason}\n`);
-  writeFileSync(join(evidenceDir, "verdict.json"), JSON.stringify({ scenario: name, verdict, reason, exit_code: result.status, elapsed_s: elapsed }, null, 2));
-  if (!KEEP) try { rmSync(sandbox, { recursive: true, force: true }); } catch {}
-  return { scenario: name, expectsInject: true, injects: blocked ? 1 : 0, verdict, reason, elapsed_s: elapsed };
-}
-
-// --------------------------------------------------------------------------
-// Scenario 8: .reflection/current_session written — after the hook fires for
-// a session, the file must contain that session's ID so agents can reference it.
-// --------------------------------------------------------------------------
-
-function runToggleCurrentSessionFileScenario() {
-  const id = 8;
-  const name = "toggle_current_session_file_written";
-  const sandbox = join(tmpdir(), "cc-reflect-e2e", `s${id}-${Date.now()}`);
-  mkdirSync(sandbox, { recursive: true, mode: 0o700 });
-  const evidenceDir = join(EVIDENCE_DIR, `scenario-${id}-${name}`);
-  mkdirSync(evidenceDir, { recursive: true });
-
-  process.stderr.write(`\n[s${id}] ${name}\n`);
-  process.stderr.write(`  sandbox  : ${sandbox}\n`);
-
-  const sessionId = "csf-session-" + Date.now();
-  const tFile = join(sandbox, `transcript-${sessionId}.jsonl`);
-  const entries = [
-    { type: "user", uuid: "u1", sessionId, message: { role: "user", content: "What is 2+2?" } },
-    { type: "assistant", uuid: "a1", sessionId, message: { role: "assistant", content: [{ type: "text", text: "4" }] } },
-  ];
-  writeFileSync(tFile, entries.map(e => JSON.stringify(e)).join("\n") + "\n");
-
-  const payload = {
-    session_id: sessionId,
-    transcript_path: tFile,
-    cwd: sandbox,
-    last_assistant_message: "4",
-    stop_hook_active: false,
-  };
-
-  spawnSync("node", [join(PLUGIN_DIR, "bin", "reflect.mjs")], {
-    input: JSON.stringify(payload),
-    cwd: sandbox,
-    timeout: 30_000,
-    encoding: "utf8",
-    env: { ...process.env, REFLECTION_CC_DEBUG: "1", REFLECTION_CC_FAKE_JUDGE: "complete:0.99" },
-  });
-
-  const currentSessionFile = join(sandbox, ".reflection", "current_session");
-  let writtenId = null;
-  try { writtenId = readFileSync(currentSessionFile, "utf8").trim(); } catch {}
-
-  writeFileSync(join(evidenceDir, "current_session.txt"), writtenId ?? "(not written)");
-
-  const verdict = writtenId === sessionId ? "PASS" : "FAIL";
-  const reason = writtenId === sessionId
-    ? `current_session file contains correct session ID (${sessionId.slice(0, 16)}…)`
-    : `expected ${sessionId}, got ${writtenId ?? "(nothing)"}`;
-
-  process.stderr.write(`  verdict : ${verdict} — ${reason}\n`);
-  writeFileSync(join(evidenceDir, "verdict.json"), JSON.stringify({ scenario: name, verdict, reason, written_id: writtenId, expected_id: sessionId }, null, 2));
-  if (!KEEP) try { rmSync(sandbox, { recursive: true, force: true }); } catch {}
-  return { scenario: name, expectsInject: false, injects: 0, verdict, reason, elapsed_s: "0.0" };
-}
-
 async function main() {
-  const allScenarios = [
-    ...SCENARIOS,
-    { id: 4, name: "direct_pipe_summary_drift", _direct: true },
-    { id: 5, name: "direct_pipe_complete_no_inject", _direct5: true },
-    { id: 6, name: "toggle_disabled_session_skips", _s6: true },
-    { id: 7, name: "toggle_other_session_unaffected", _s7: true },
-    { id: 8, name: "toggle_current_session_file_written", _s8: true },
-  ];
+  const allScenarios = [...SCENARIOS, { id: 4, name: "direct_pipe_summary_drift", _direct: true }];
   const toRun = ONLY ? allScenarios.filter(s => s.id === ONLY) : allScenarios;
   if (toRun.length === 0) {
     process.stderr.write(`No scenario with id ${ONLY}\n`);
@@ -722,22 +408,6 @@ async function main() {
   for (const scenario of toRun) {
     if (scenario._direct) {
       summary.push(runDirectPipeScenario());
-      continue;
-    }
-    if (scenario._direct5) {
-      summary.push(runDirectPipeCompleteScenario());
-      continue;
-    }
-    if (scenario._s6) {
-      summary.push(runToggleDisabledSkipsScenario());
-      continue;
-    }
-    if (scenario._s7) {
-      summary.push(runToggleOtherSessionUnaffectedScenario());
-      continue;
-    }
-    if (scenario._s8) {
-      summary.push(runToggleCurrentSessionFileScenario());
       continue;
     }
     const run = runScenario(scenario);
